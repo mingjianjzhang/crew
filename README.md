@@ -142,15 +142,22 @@ retrying. Crew never retries or wakes the primary on its own.
 
 Teardown archives the record in `data/<id>/` and removes the worktree and local
 branch. It refuses dirty worktrees, live or unknown agents, unlanded ship work,
-and scouts without a report or with outstanding decisions. For a squash merge,
-the merged PR's head must equal the local tip. If no PR exists, a fresh origin
-fetch must show an identical default-branch tree. GitHub lookup errors refuse
-cleanup. Remote branches are never removed.
+scouts without a report or with outstanding decisions, and **any task whose
+`.crew/usage.json` is missing or invalid**. For a squash merge, the merged PR's
+head must equal the local tip. If no PR exists, a fresh origin fetch must show
+an identical default-branch tree. GitHub lookup errors refuse cleanup. Remote
+branches are never removed.
+
+Workers write usage with `.crew/crew-usage` before `done` (schema
+`docs/usage-schema.md`: tokens, cache, cost, PR link). Teardown copies the
+record into `data/<id>/`, `state/usage/<id>.json`, and appends `state/usage.jsonl`
+for session rollups.
 
 `--discard` deliberately bypasses the landing, dirty-tree, and live-worker
-checks. Use it only after an explicit decision to discard that task. It can
-terminate a worker and destroy uncommitted project files; the archive preserves
-Crew records, not a backup of discarded project changes.
+checks, but **still requires usage metrics**. Use it only after an explicit
+decision to discard that task. It can terminate a worker and destroy
+uncommitted project files; the archive preserves Crew records, not a backup of
+discarded project changes.
 
 ## Files worth reading
 
@@ -166,6 +173,8 @@ Crew records, not a backup of discarded project changes.
 | `bin/teardown` | Landing checks, archive, and removal |
 | `lib/common.sh` | Shared locking, JSON metadata, Git identity checks, log reduction |
 | `lib/crew-status` | Tiny append helper copied into each worktree |
+| `lib/crew-usage` | Writes validated `.crew/usage.json` (`crew-usage/v1`) |
+| `docs/usage-schema.md` | Required worker usage / cost log format |
 
 Live JSON metadata lives in `state/<id>.meta`. Worktrees live under
 `state/worktrees/<id>/`, each with an ignored `.crew/` directory containing the

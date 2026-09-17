@@ -88,6 +88,14 @@ Use `bin/teardown`; do not remove worktrees or branches manually.
 Never pass `--discard` without an explicit human instruction to discard
 that task in the current conversation.
 
+Teardown requires a valid `.crew/usage.json` (`crew-usage/v1`) even with
+`--discard` (unused reservations with no checkout are the only exception).
+If a finished worker omitted usage, have it write metrics with
+`.crew/crew-usage` before teardown, or write an `unavailable` record
+yourself only when the human authorizes collecting zeros. Rollups land in
+`state/usage.jsonl` and `state/usage/<id>.json` (gitignored with `state/`).
+See `docs/usage-schema.md`.
+
 ## Boundaries
 
 Follow the project's own instructions and the brief's delivery rules.

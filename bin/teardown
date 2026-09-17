@@ -21,6 +21,8 @@ fi
 if [[ $PHASE != removed && $PHASE != removing ]]; then
   verify_worktree
   verify_workspace
+  # Usage is required for every prepared checkout, including --discard.
+  require_usage_record "$WORKTREE/.crew/usage.json"
   live=$(agent_state)
   case $live in working|blocked|unknown) [[ $discard == --discard ]] || die "Agent is $live; refusing teardown.";; esac
   dirty=$(git -C "$WORKTREE" status --porcelain --untracked-files=all)
@@ -47,6 +49,7 @@ if [[ $PHASE != removed && $PHASE != removing ]]; then
   mkdir -p "$archive"
   cp "$META" "$archive/task.meta"
   cp -R "$WORKTREE/.crew/." "$archive/"
+  record_usage_rollup "$WORKTREE/.crew/usage.json"
   meta_update --arg tip "$tip" '.teardown_tip=$tip | .phase="removing"'
   PHASE=removing
 fi
@@ -55,12 +58,15 @@ if [[ $PHASE == removing ]]; then
     verify_worktree
     verify_workspace
     [[ $(git -C "$WORKTREE" rev-parse HEAD) == "$(jq -r .teardown_tip "$META")" ]] || die 'Branch advanced during teardown; inspect before continuing.'
+    require_usage_record "$WORKTREE/.crew/usage.json"
     live=$(agent_state)
     case $live in working|blocked|unknown) [[ $discard == --discard ]] || die "Agent is $live; refusing teardown.";; esac
     dirty=$(git -C "$WORKTREE" status --porcelain --untracked-files=all)
     [[ -z $dirty || $discard == --discard ]] || die "Worktree changed during teardown; refusing removal."
     # Refresh the archive after any interrupted attempt, before another removal attempt.
     cp -R "$WORKTREE/.crew/." "$archive/"
+    # Ensure rollup exists even if the first attempt died after phase=removing.
+    [[ -f $STATE/usage/$ID.json ]] || record_usage_rollup "$WORKTREE/.crew/usage.json"
     # Free preview ports and the task-scoped browser bridge before dropping the checkout.
     release_task_resources "$ID" "$WORKTREE" "$(jq -r .port_base "$META")" || true
     if [[ $discard == --discard ]]; then
@@ -71,6 +77,9 @@ if [[ $PHASE == removing ]]; then
     [[ ! -e $WORKTREE ]] || die 'herdr did not remove the worktree.'
   else
     # Worktree already gone (interrupted teardown); still free ports/session.
+    # Usage must already be archived from the first attempt.
+    [[ -f $archive/usage.json || -f $STATE/usage/$ID.json ]] ||
+      die "Worktree gone but usage metrics were never archived for $ID."
     release_task_resources "$ID" "" "$(jq -r .port_base "$META")" || true
   fi
   phase removed

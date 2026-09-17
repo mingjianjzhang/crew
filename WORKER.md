@@ -52,6 +52,14 @@ On failure, record `failed` with the reason before ending your turn.
 On completion, record `done` with the deliverable before ending
 your turn.
 
+**Usage metrics (required):** before `done` or `failed`, write
+`.crew/usage.json` with `.crew/crew-usage` (or an equivalent valid
+`crew-usage/v1` file). Include input/output tokens, cached-read and
+cache-creation when the harness exposes them, reasoning tokens when
+known, `costUsd` when known, and the final PR `url`/`number` for ship
+tasks. Prefer `source: harness`. Teardown (including discard) refuses
+tasks without a valid usage file. Schema: Crew home `docs/usage-schema.md`.
+
 Write updates to the status log rather than addressing the human.
 
 ## Request a decision
@@ -103,7 +111,7 @@ Deliver the branch and PR, or the delivery specified in the brief.
 Use no-mistakes only when requested.
 
 The done event should identify the deliverable and summarize verification
-and any remaining human checks.
+and any remaining human checks. Always emit usage metrics first (see above).
 
 ## Scout tasks
 
@@ -111,4 +119,5 @@ Investigate the brief's question.
 Do not change project code or make commits.
 Keep scratch work under `.crew/`.
 
-Write findings to `.crew/report.md`, then record done with that path.
+Write findings to `.crew/report.md`, emit usage metrics, then record done
+with the report path.

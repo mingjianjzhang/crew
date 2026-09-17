@@ -76,6 +76,47 @@ agent_state() {
   fi
 }
 append_event() { "$WORKTREE/.crew/crew-status" "$1" "$2"; }
+# Refuse teardown unless .crew/usage.json is a valid crew-usage/v1 record for this task.
+require_usage_record() {
+  local path=$1
+  [[ -f $path && ! -L $path ]] ||
+    die "Missing usage metrics at $path. Worker must run .crew/crew-usage (see docs/usage-schema.md) before teardown."
+  jq -e --arg id "$ID" --arg kind "$KIND" '
+    def nonneg: type == "number" and . >= 0;
+    def opt_nonneg: . == null or nonneg;
+    .schema == "crew-usage/v1"
+    and .taskId == $id
+    and .kind == $kind
+    and (.harness | type == "string" and length > 0)
+    and (.model | type == "string" and length > 0)
+    and (.recordedAt | type == "string" and length > 0)
+    and (.source == "harness" or .source == "estimated" or .source == "unavailable")
+    and (.tokens | type == "object")
+    and (.tokens.input | nonneg)
+    and (.tokens.output | nonneg)
+    and (.tokens.cachedRead | opt_nonneg)
+    and (.tokens.cacheCreation | opt_nonneg)
+    and (.tokens.reasoning | opt_nonneg)
+    and (.costUsd | opt_nonneg)
+    and (
+      .pr == null
+      or (
+        (.pr | type == "object")
+        and (.pr.url | type == "string" and startswith("https://"))
+        and (.pr.number | . == null or type == "number")
+      )
+    )
+  ' "$path" >/dev/null ||
+    die "Invalid usage metrics in $path (need crew-usage/v1 for task $ID). See docs/usage-schema.md."
+}
+# Append one rollup line and keep a durable copy under state/usage/.
+record_usage_rollup() {
+  local path=$1
+  mkdir -p "$STATE/usage"
+  cp "$path" "$STATE/usage/$ID.json"
+  jq -c --arg id "$ID" --arg archived "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '. + {crewTaskId:$id, archivedAt:$archived}' "$path" >> "$STATE/usage.jsonl"
+}
 log_summary() {
   jq -Rn --argjson seen "${2:-0}" '
     [inputs | capture("^(?<time>[0-9]+) (?<verb>working|needs-decision|resolved|done|failed): (?<note>.*)$")

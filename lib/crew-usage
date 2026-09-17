@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Validate and write .crew/usage.json (crew-usage/v1). Copied into each worktree.
+set -euo pipefail
+export LC_ALL=C
+
+crew_dir=$(cd "$(dirname "$0")" && pwd -P)
+usage_path=$crew_dir/usage.json
+
+usage_help() {
+  cat <<'EOF' >&2
+Usage: .crew/crew-usage --input N --output N [options]
+
+Required:
+  --input N              Gross or total input tokens
+  --output N             Output tokens
+
+Optional:
+  --cached-read N        Cached read / cache hit tokens (default 0)
+  --cache-creation N     Cache write / creation tokens (default 0)
+  --reasoning N          Reasoning tokens (default 0)
+  --cost-usd X           Dollar cost (omit for null)
+  --source harness|estimated|unavailable   (default harness)
+  --pr-url URL           Final PR https URL
+  --pr-number N          PR number
+  --model ID             Override model id
+  --effort LEVEL         Override effort
+  --harness KIND         Override harness
+  --kind ship|scout      Override kind
+  --task-id ID           Override task id
+  --notes TEXT           Single-line note
+  --help
+EOF
+}
+
+[[ ${1:-} != --help ]] || { usage_help; exit 0; }
+
+input=; output=; cached_read=0; cache_creation=0; reasoning=0
+cost_usd=; cost_set=false; source=harness
+pr_url=; pr_number=; model=; effort=; harness=; kind=; task_id=; notes=
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --input) input=$2; shift 2;;
+    --output) output=$2; shift 2;;
+    --cached-read) cached_read=$2; shift 2;;
+    --cache-creation) cache_creation=$2; shift 2;;
+    --reasoning) reasoning=$2; shift 2;;
+    --cost-usd) cost_usd=$2; cost_set=true; shift 2;;
+    --source) source=$2; shift 2;;
+    --pr-url) pr_url=$2; shift 2;;
+    --pr-number) pr_number=$2; shift 2;;
+    --model) model=$2; shift 2;;
+    --effort) effort=$2; shift 2;;
+    --harness) harness=$2; shift 2;;
+    --kind) kind=$2; shift 2;;
+    --task-id) task_id=$2; shift 2;;
+    --notes) notes=$2; shift 2;;
+    --help) usage_help; exit 0;;
+    *) echo "Unknown option: $1" >&2; usage_help; exit 2;;
+  esac
+done
+
+[[ -n $input && -n $output ]] || { echo 'Required: --input and --output.' >&2; exit 2; }
+[[ $input =~ ^[0-9]+([.][0-9]+)?$ && $output =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+  { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
+for n in "$cached_read" "$cache_creation" "$reasoning"; do
+  [[ $n =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
+done
+case $source in harness|estimated|unavailable) ;; *)
+  echo 'source must be harness, estimated, or unavailable.' >&2; exit 2;;
+esac
+if $cost_set; then
+  [[ $cost_usd =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'costUsd must be a non-negative number.' >&2; exit 2; }
+fi
+if [[ -n $pr_url ]]; then
+  [[ $pr_url =~ ^https:// ]] || { echo 'pr url must be https.' >&2; exit 2; }
+fi
+if [[ -n $pr_number ]]; then
+  [[ $pr_number =~ ^[0-9]+$ ]] || { echo 'pr number must be an integer.' >&2; exit 2; }
+fi
+if [[ -n $notes ]]; then
+  [[ $notes != *$'\n'* && ${#notes} -le 500 ]] || { echo 'notes must be one short line.' >&2; exit 2; }
+fi
+
+# Prefer spawn's task-meta sidecar; fall back to the brief assignment line.
+if [[ -f $crew_dir/task-meta.json ]]; then
+  meta_file=$crew_dir/task-meta.json
+  [[ -n $task_id ]] || task_id=$(jq -r '.id // empty' "$meta_file")
+  [[ -n $kind ]] || kind=$(jq -r '.kind // empty' "$meta_file")
+  [[ -n $harness ]] || harness=$(jq -r '.harness // empty' "$meta_file")
+  [[ -n $model ]] || model=$(jq -r '.model // empty' "$meta_file")
+  [[ -n $effort ]] || effort=$(jq -r '.effort // empty' "$meta_file")
+fi
+[[ $effort == null ]] && effort=
+
+if [[ -z $task_id || -z $kind ]] && [[ -f $crew_dir/brief.md ]]; then
+  assign=$(grep -E '^Crew assignment: ' "$crew_dir/brief.md" | tail -n1 || true)
+  # "Crew assignment: id (kind). Branch: ..."
+  rest=${assign#Crew assignment: }
+  parsed_id=${rest%% *}
+  after_id=${rest#"$parsed_id" }
+  parsed_kind=${after_id#\(}
+  parsed_kind=${parsed_kind%%\)*}
+  [[ -n $task_id ]] || task_id=$parsed_id
+  [[ -n $kind ]] || kind=$parsed_kind
+fi
+[[ -n $task_id && -n $kind ]] || { echo 'Could not resolve taskId/kind; pass --task-id and --kind.' >&2; exit 2; }
+case $kind in ship|scout) ;; *) echo 'kind must be ship or scout.' >&2; exit 2;; esac
+[[ -n $harness ]] || harness=unknown
+[[ -n $model ]] || model=unknown
+
+recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+pr_json=null
+if [[ -n $pr_url ]]; then
+  if [[ -n $pr_number ]]; then
+    pr_json=$(jq -cn --arg url "$pr_url" --argjson n "$pr_number" '{url:$url,number:$n}')
+  else
+    pr_json=$(jq -cn --arg url "$pr_url" '{url:$url}')
+  fi
+fi
+
+cost_json=null
+if $cost_set; then cost_json=$cost_usd; fi
+
+effort_json=null
+if [[ -n $effort && $effort != null ]]; then effort_json=$(jq -cn --arg e "$effort" '$e'); fi
+
+notes_json=null
+if [[ -n $notes ]]; then notes_json=$(jq -cn --arg n "$notes" '$n'); fi
+
+tmp=$usage_path.tmp.$$
+jq -cn \
+  --arg schema 'crew-usage/v1' \
+  --arg taskId "$task_id" \
+  --arg kind "$kind" \
+  --arg harness "$harness" \
+  --arg model "$model" \
+  --argjson effort "$effort_json" \
+  --arg recordedAt "$recorded_at" \
+  --arg source "$source" \
+  --argjson pr "$pr_json" \
+  --argjson input "$input" \
+  --argjson output "$output" \
+  --argjson cachedRead "$cached_read" \
+  --argjson cacheCreation "$cache_creation" \
+  --argjson reasoning "$reasoning" \
+  --argjson costUsd "$cost_json" \
+  --argjson notes "$notes_json" \
+  '{
+    schema:$schema,taskId:$taskId,kind:$kind,harness:$harness,model:$model,
+    effort:$effort,recordedAt:$recordedAt,source:$source,pr:$pr,
+    tokens:{input:$input,output:$output,cachedRead:$cachedRead,
+            cacheCreation:$cacheCreation,reasoning:$reasoning},
+    costUsd:$costUsd,notes:$notes
+  } | with_entries(select(.value != null))' > "$tmp"
+mv "$tmp" "$usage_path"
+echo "Wrote $usage_path"

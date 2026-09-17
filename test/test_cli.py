@@ -84,8 +84,29 @@ class CrewTest(unittest.TestCase):
     def event(self, verb, note, ident='one', **kwargs):
         return self.run_cmd([str(self.worktree(ident) / '.crew/crew-status'), verb, note], **kwargs)
 
+    def usage(self, ident='one', **kwargs):
+        wt = self.worktree(ident)
+        meta = self.meta(ident)
+        cmd = [str(wt / '.crew/crew-usage'),
+               '--input', str(kwargs.get('input', 100)),
+               '--output', str(kwargs.get('output', 20)),
+               '--cached-read', str(kwargs.get('cached_read', 50)),
+               '--source', kwargs.get('source', 'harness'),
+               '--task-id', ident,
+               '--kind', meta['kind'],
+               '--harness', meta.get('harness') or 'claude',
+               '--model', meta.get('model') or 'test-model']
+        if 'pr_url' in kwargs:
+            cmd.extend(['--pr-url', kwargs['pr_url']])
+        if 'pr_number' in kwargs:
+            cmd.extend(['--pr-number', str(kwargs['pr_number'])])
+        if 'cost_usd' in kwargs:
+            cmd.extend(['--cost-usd', str(kwargs['cost_usd'])])
+        return self.run_cmd(cmd)
+
     def report(self, ident='one'):
         (self.worktree(ident) / '.crew/report.md').write_text('Findings.\n')
+        self.usage(ident)
         self.event('done', '.crew/report.md', ident)
         self.agent('done', ident)
 
@@ -293,22 +314,37 @@ class CrewTest(unittest.TestCase):
         self.spawn()
         self.cli('teardown', 'one', ok=False)  # live worker
         self.agent('done')
-        self.cli('teardown', 'one', ok=False)  # no report
+        self.cli('teardown', 'one', ok=False)  # no report / no usage
         self.report()
         (self.worktree() / 'dirty.txt').write_text('keep me')
         self.cli('teardown', 'one', ok=False)
         (self.worktree() / 'dirty.txt').unlink()
         self.cli('teardown', 'one')
         self.assertTrue((self.crew / 'data/one/report.md').exists())
+        self.assertTrue((self.crew / 'data/one/usage.json').exists())
+        self.assertTrue((self.crew / 'state/usage/one.json').exists())
+        self.assertTrue((self.crew / 'state/usage.jsonl').exists())
         self.assertFalse((self.crew / 'state/one.meta').exists())
         self.assertFalse((self.crew / 'state/worktrees/one').exists())
         self.spawn(ok=False)  # archived ids cannot be reused
+
+    def test_teardown_requires_usage_even_with_discard(self):
+        self.spawn()
+        self.agent('done')
+        (self.worktree() / '.crew/report.md').write_text('Findings.\n')
+        self.event('done', '.crew/report.md')
+        result = self.cli('teardown', 'one', '--discard', ok=False)
+        self.assertIn('usage', result.stderr.lower())
+        self.usage(pr_url='https://example.com/pull/1', pr_number=1, cost_usd=0.5)
+        self.cli('teardown', 'one', '--discard')
+        self.assertTrue((self.crew / 'data/one/usage.json').exists())
 
     def test_ship_landing_and_local_tip_guard(self):
         self.spawn(kind='ship')
         wt = self.worktree()
         (wt / 'hello.txt').write_text('changed\n')
         self.git('-C', str(wt), 'commit', '-am', 'Change')
+        self.usage(pr_url='https://example.com/pull/9', pr_number=9)
         self.agent('done')
         self.cli('teardown', 'one', ok=False)
         tip = self.git('-C', str(wt), 'rev-parse', 'HEAD')
@@ -356,6 +392,7 @@ class CrewTest(unittest.TestCase):
     def test_failed_reservation_discard_releases_port(self):
         self.spawn(ok=False, env=dict(self.env, CREW_TEST_CREATE_FAIL='1'))
         self.cli('teardown', 'one', ok=False)
+        # Incomplete reservation (no checkout) may discard without usage.
         self.cli('teardown', 'one', '--discard')
         self.spawn('two')
         self.assertEqual(self.meta('two')['port_base'], 5100)
@@ -370,6 +407,7 @@ class CrewTest(unittest.TestCase):
 
     def test_identical_ship_tree_can_land_without_pr(self):
         self.spawn(kind='ship')
+        self.usage()
         self.agent('done')
         self.cli('teardown', 'one')
 
