@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/../lib/common.sh"
+[[ ${1:-} != --help ]] || { echo 'Usage: bin/answer ID KEY TEXT|@FILE|--deliver'; exit 0; }
+[[ $# == 3 ]] || die 'Usage: bin/answer ID KEY TEXT|@FILE|--deliver'
+require_runtime
+valid_id "$1"; valid_key "$2"
+lock "$STATE/$1.lock"; load_task "$1"; key=$2; answer=$3
+[[ $PHASE == dispatched ]] || die 'Task has not completed dispatch.'
+verify_worktree
+[[ -d $WORKTREE/.crew/answers && ! -L $WORKTREE/.crew/answers ]] || die 'Missing or unsafe answers directory.'
+log=$WORKTREE/.crew/status
+awk -v key="$key" '$2 == "needs-decision:" && $3 == key {found=1} END {exit !found}' "$log" || die "No recorded decision: $key"
+file=$WORKTREE/.crew/answers/$key.md
+if [[ $answer == --deliver ]]; then
+  [[ -s $file && ! -L $file ]] || die 'No saved answer to deliver.'
+else
+  temp=$(mktemp "$WORKTREE/.crew/answers/.answer.XXXXXX")
+  if [[ $answer == @* ]]; then cat "${answer#@}" > "$temp"; else printf '%s\n' "$answer" > "$temp"; fi
+  [[ -s $temp ]] || { rm "$temp"; die 'An answer cannot be empty.'; }
+  mv "$temp" "$file"
+fi
+live=$(agent_state)
+if [[ $live == idle || $live == done ]]; then
+  if herdr agent prompt "$AGENT" "Decision $key is answered in .crew/answers/$key.md. Read it and continue the brief."; then
+    append_event resolved "$key delivered"
+    echo "$ID: answer $key delivered."
+    exit 0
+  fi
+  live='delivery unconfirmed; inspect pane before retrying'
+fi
+append_event resolved "$key pending"
+printf '%s: answer %s saved, delivery pending (%s). Retry explicitly with bin/answer %s %s --deliver.\n' "$ID" "$key" "$live" "$ID" "$key"

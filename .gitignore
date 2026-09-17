@@ -1,0 +1,31 @@
+# Live Crew runtime (metas, locks, worktrees, share boards, seen cursor)
+/state/
+
+# Archived task checkouts and worker artifacts (logs, shots, npm caches)
+/data/
+
+# Local lavish annotations / exports
+.lavish/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Logs and env secrets
+*.log
+.env
+.env.*
+!.env.example

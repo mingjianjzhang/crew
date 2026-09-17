@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/../lib/common.sh"
+source "$(dirname "$0")/../lib/release-resources.sh"
+[[ ${1:-} != --help ]] || { echo 'Usage: bin/teardown ID [--discard]'; exit 0; }
+[[ $# == 1 || ( $# == 2 && $2 == --discard ) ]] || die 'Usage: bin/teardown ID [--discard]'
+require_runtime
+valid_id "$1"; lock "$STATE/$1.lock"; load_task "$1"
+discard=${2:-}; archive=$CREW_ROOT/data/$ID
+# Failed creation with no checkout can release its reservation only by explicit discard.
+if [[ ! -d $WORKTREE && ( $PHASE == reserved || $PHASE == creating ) ]]; then
+  [[ $discard == --discard ]] || die 'Incomplete spawn. Resume it, or explicitly discard its reservation.'
+  git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$BRANCH" && die 'A branch remains after partial creation; inspect it before cleanup.'
+  release_task_resources "$ID" "$WORKTREE" "$(jq -r .port_base "$META")" || true
+  mkdir -p "$archive"
+  cp "$META" "$archive/task.meta"; cp "$STATE/$ID.brief.md" "$archive/brief.md"
+  rm "$META" "$STATE/$ID.brief.md"
+  rm -f "$STATE/$ID.create.json"
+  echo "$ID: unused reservation archived and released."
+  exit 0
+fi
+if [[ $PHASE != removed && $PHASE != removing ]]; then
+  verify_worktree
+  verify_workspace
+  live=$(agent_state)
+  case $live in working|blocked|unknown) [[ $discard == --discard ]] || die "Agent is $live; refusing teardown.";; esac
+  dirty=$(git -C "$WORKTREE" status --porcelain --untracked-files=all)
+  [[ -z $dirty || $discard == --discard ]] || die 'Worktree has uncommitted files; refusing teardown.'
+  tip=$(git -C "$WORKTREE" rev-parse HEAD)
+  if [[ $discard != --discard && $KIND == ship ]]; then
+    command -v gh >/dev/null || die 'GitHub CLI (gh) is required for the structured landing check.'
+    # gh-axi has no structured JSON passthrough for this check.
+    prs=$(cd "$PROJECT" && gh pr list --head "$BRANCH" --state all --json state,headRefOid,headRepository,headRepositoryOwner,isCrossRepository --limit 100) ||
+      die 'PR lookup failed; refusing to infer that there is no PR.'
+    if [[ $(jq length <<< "$prs") -gt 0 ]]; then
+      jq -e --arg tip "$tip" 'any(.[]; .state == "MERGED" and .headRefOid == $tip and .isCrossRepository == false)' <<< "$prs" >/dev/null ||
+        die 'Ship branch is not landed at its current tip.'
+    else
+      git -C "$PROJECT" fetch origin
+      git -C "$PROJECT" diff --quiet "$(jq -r .base "$META")" "$BRANCH" || die "No PR and branch differs from base $(jq -r .base "$META")."
+    fi
+  elif [[ $discard != --discard && $KIND == scout ]]; then
+    [[ -s $WORKTREE/.crew/report.md ]] || die 'Scout report is missing.'
+    summary=$(log_summary "$WORKTREE/.crew/status")
+    [[ $(jq '.decisions|length' <<< "$summary") == 0 && $(jq '.pending|length' <<< "$summary") == 0 ]] || die 'Scout has an outstanding decision.'
+  fi
+  # Copy the complete local record before deletion. Failed copies leave the checkout intact.
+  mkdir -p "$archive"
+  cp "$META" "$archive/task.meta"
+  cp -R "$WORKTREE/.crew/." "$archive/"
+  meta_update --arg tip "$tip" '.teardown_tip=$tip | .phase="removing"'
+  PHASE=removing
+fi
+if [[ $PHASE == removing ]]; then
+  if [[ -d $WORKTREE ]]; then
+    verify_worktree
+    verify_workspace
+    [[ $(git -C "$WORKTREE" rev-parse HEAD) == "$(jq -r .teardown_tip "$META")" ]] || die 'Branch advanced during teardown; inspect before continuing.'
+    live=$(agent_state)
+    case $live in working|blocked|unknown) [[ $discard == --discard ]] || die "Agent is $live; refusing teardown.";; esac
+    dirty=$(git -C "$WORKTREE" status --porcelain --untracked-files=all)
+    [[ -z $dirty || $discard == --discard ]] || die "Worktree changed during teardown; refusing removal."
+    # Refresh the archive after any interrupted attempt, before another removal attempt.
+    cp -R "$WORKTREE/.crew/." "$archive/"
+    # Free preview ports and the task-scoped browser bridge before dropping the checkout.
+    release_task_resources "$ID" "$WORKTREE" "$(jq -r .port_base "$META")" || true
+    if [[ $discard == --discard ]]; then
+      herdr worktree remove --workspace "$WORKSPACE" --force
+    else
+      herdr worktree remove --workspace "$WORKSPACE"
+    fi
+    [[ ! -e $WORKTREE ]] || die 'herdr did not remove the worktree.'
+  else
+    # Worktree already gone (interrupted teardown); still free ports/session.
+    release_task_resources "$ID" "" "$(jq -r .port_base "$META")" || true
+  fi
+  phase removed
+fi
+if git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  [[ $(git -C "$PROJECT" rev-parse "$BRANCH") == "$(jq -r .teardown_tip "$META")" ]] || die 'Branch tip changed; refusing branch deletion.'
+  # -D is intentional after the landing guard: squash merges are not ancestry merges.
+  git -C "$PROJECT" branch -D "$BRANCH"
+fi
+cp "$META" "$archive/task.meta"
+rm "$META"
+rm -f "$STATE/$ID.brief.md" "$STATE/$ID.create.json" "$STATE/$ID.start.json" "$STATE/$ID.prompt.json"
+echo "$ID: archived to $archive; worktree and local branch removed."

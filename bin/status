@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# The log is truth. herdr is read once per row and never focused.
+source "$(dirname "$0")/../lib/common.sh"
+[[ ${1:-} != --help ]] || { echo 'Usage: bin/status [--ack]'; exit 0; }
+[[ $# == 0 || ( $# == 1 && $1 == --ack ) ]] || die 'Usage: bin/status [--ack]'
+require_runtime
+ack=${1:-}; cursor='{}'
+if [[ $ack == --ack ]]; then lock "$STATE/.seen.lock"; fi
+[[ ! -f $STATE/seen ]] || cursor=$(cat "$STATE/seen")
+jq -e 'type == "object" and all(.[]; type == "number")' <<< "$cursor" >/dev/null || die 'Invalid state/seen.'
+printf '%-27s %-16s %-8s %s\n' TASK STATUS HERDR NOTE
+shopt -s nullglob
+for file in "$STATE"/*.meta; do
+  load_task "$(basename "$file" .meta)"
+  live=$(agent_state)
+  if [[ ! -d $WORKTREE ]]; then
+    printf '%-27s %-16s %-8s %s\n' "$ID" lost "$live" "spawn phase: $PHASE; inspect $META"
+    continue
+  fi
+  if [[ ! -f $WORKTREE/.crew/status ]]; then
+    printf '%-27s %-16s %-8s %s\n' "$ID" incomplete "$live" "spawn phase: $PHASE; use bin/spawn --resume $ID"
+    continue
+  fi
+  seen=$(jq -r --arg id "$ID" '.[$id] // 0' <<< "$cursor")
+  summary=$(log_summary "$WORKTREE/.crew/status" "$seen")
+  row=$(jq -r .row <<< "$summary"); note=$(jq -r .note <<< "$summary")
+  if [[ $row == working ]]; then
+    case $live in
+      blocked) note="$note; blocked in pane";;
+      idle|done) note="$note; stopped without reporting";;
+      gone) note="$note; worker exited without reporting";;
+      unknown) note="$note; live state unavailable";;
+    esac
+  fi
+  [[ $PHASE == dispatched ]] || note="$note; spawn phase: $PHASE"
+  printf '%-27s %-16s %-8s %s\n' "$ID" "$row" "$live" "$note"
+  jq -r '.pending[] | "  answer pending: " + .' <<< "$summary"
+  jq -r '.unread[] | "  unread: " + .verb + ": " + .note' <<< "$summary"
+  cursor=$(jq --arg id "$ID" --argjson count "$(jq .count <<< "$summary")" '.[$id]=$count' <<< "$cursor")
+done
+if [[ $ack == --ack ]]; then
+  printf '%s\n' "$cursor" > "$STATE/seen.tmp"; mv "$STATE/seen.tmp" "$STATE/seen"
+fi

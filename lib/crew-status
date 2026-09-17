@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+[[ ${HERDR_ENV:-} == 1 ]] || { echo 'crew-status requires herdr.' >&2; exit 1; }
+[[ $# == 2 ]] || { echo 'Usage: .crew/crew-status <verb> <note>' >&2; exit 2; }
+case $1 in working|needs-decision|resolved|done|failed) ;; *) echo 'Invalid status verb.' >&2; exit 2;; esac
+[[ -n $2 && ${#2} -le 3000 && $2 != *[$'\r\n\t\033']* ]] || { echo 'Note must be one short plain-text line.' >&2; exit 2; }
+if [[ $1 == needs-decision || $1 == resolved ]]; then
+  [[ $2 =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\ .+ ]] || { echo 'Expected a safe decision key followed by a note.' >&2; exit 2; }
+fi
+# One short append; the helper stays self-contained in the worker checkout.
+printf '%s %s: %s\n' "$(date +%s)" "$1" "$2" >> "$(dirname "$0")/status"

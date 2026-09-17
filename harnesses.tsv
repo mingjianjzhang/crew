@@ -1,0 +1,7 @@
+# kind<TAB>permission policy<TAB>permission args JSON<TAB>model args JSON<TAB>effort args JSON
+# Placeholders are replaced as literal strings, never evaluated as shell.
+claude	guarded	["--permission-mode","auto"]	["--model","{model}"]	["--effort","{effort}"]
+grok	guarded	["--permission-mode","auto"]	["--model","{model}"]	["--reasoning-effort","{effort}"]
+codex	guarded	["-a","never","-s","workspace-write","-c","sandbox_workspace_write.network_access=true"]	["--model","{model}"]	["-c","model_reasoning_effort=\"{effort}\""]
+pi	bypass	[]	["--model","{model}"]	["--thinking","{effort}"]
+# Cursor is deliberately absent until installed and smoke-tested.
