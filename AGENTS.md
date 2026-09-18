@@ -72,6 +72,41 @@ Prefer workers for parallel or substantial work and work that should
 be isolated from the user's checkout. Small project changes may be
 completed directly when authorized.
 
+## Remediation and debugging sessions
+
+For an explicit human debugging request, resolve the intent before spawning:
+
+- **Hosted session:** if the human asks to **start a debugging session** for
+  Community without a packet path, use `Mode: hosted-debug-session`. Keep the
+  packet path `pending`, pass the tested branch/head and share, and let the
+  worker start Community on its task `PORT` with the shared `PLAYTEST_DIR`.
+- **Packet path:** if an absolute packet already exists, use
+  `Mode: packet-path` and put that source-of-truth path in the brief. The worker
+  reads it in place; do not copy it into the worktree.
+- Resolve `fix` (`ship`) versus `investigate` (`scout`). A bare packet path is
+  not authorization to fix; ask when the intent is unclear.
+
+Hosted sessions use one spawn and then stop. For example:
+
+```sh
+bin/spawn --id community-debug-session1 \
+  --project /absolute/path/to/community-repair-workshop \
+  --kind ship --profile mechanics --unattended-bypass \
+  --base crew/ipf --share crew-ipf \
+  --brief state/community-debug-session1.md
+```
+
+The brief must record the expected tested SHA, intent, scope, share, and
+`Mode`; use the design's thin brief contract rather than inventing fields.
+After the hosted worker reports `PORT`, URL, absolute `PLAYTEST_DIR`, filing
+locations, and `needs-decision` key `hosted-session-ready`, the human
+playtests and files bugs on that port. Resume **only** through the answer flow,
+for example `bin/answer community-debug-session1 hosted-session-ready 'Bugs filed; continue.'`
+Do not poll, focus the pane, or send an out-of-band prompt. The worker then
+reads `PLAYTEST_DIR/bugs` and runs the available summary/digest. See
+[`docs/design-remediation-debugging-agent.md`](docs/design-remediation-debugging-agent.md)
+and [`docs/plan-remediation-loop.md`](docs/plan-remediation-loop.md).
+
 ## Reading results and answering decisions
 
 Status files are the durable record. herdr state is a live hint.

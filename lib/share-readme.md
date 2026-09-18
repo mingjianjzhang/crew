@@ -8,6 +8,17 @@ Tasks on this share also use the durable playtest source of truth at
 servers and recording/digest tools should read and write packets there; teardown
 retains this root, and packets should not be copied into a worktree.
 
+## Remediation notes
+
+Use the shared board for short handoff notes, not packet copies. Name them:
+
+- `updates/<task>-remediation-ready.md` for a hosted worker's `PORT`, URL,
+  `PLAYTEST_DIR`, filing locations, and `hosted-session-ready` wait;
+- `reviews/<task>-remediation.md` for findings-only evidence and missing-gate
+  details; and
+- `updates/<task>-fix.md` for a proposed fix, labeled **proposed** until it
+  lands.
+
 ## Rules
 
 - Write useful notes other workers (and the primary) may need.

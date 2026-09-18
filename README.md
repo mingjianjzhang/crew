@@ -4,6 +4,24 @@ Small, request-driven dispatch on herdr. A primary writes a brief, launches
 an isolated worker, and ends its turn. The human supervises through herdr
 and asks the primary for updates. There is no polling service or automatic wake-up.
 
+## Remediation / debugging sessions
+
+Crew supports two explicit Debugging Agent intake modes. The role lives in the
+brief; it is not a new profile, service, or task kind.
+
+| Mode | Primary intake | Worker handoff |
+| --- | --- | --- |
+| `hosted-debug-session` | Human asks to start a Community session without a packet; pass the tested `--base`, `--share`, and `fix`/`investigate` intent. | Worker starts Community on task `PORT`, honors `PLAYTEST_DIR`, reports URL/root and filing locations, then waits on `hosted-session-ready`. Human playtests and the primary resumes with `bin/answer`. |
+| `packet-path` | Human supplies an absolute existing packet and explicit `fix` or `investigate` intent. | Worker reads the packet at its shared source-of-truth path, without copying it or inventing a reproduction, then applies the evidence gate. |
+
+For hosted mode, the primary spawns once and stops; after the human files a
+bug under `$PLAYTEST_DIR/bugs/<id>/` (recordings are under
+`$PLAYTEST_DIR` today), the primary answers the waiting task. The worker then
+summarizes the evidence and delivers a fix PR or findings. See the
+[Debugging Agent design](docs/design-remediation-debugging-agent.md) and
+[remediation plan](docs/plan-remediation-loop.md) for the brief contract and
+phase details.
+
 ## Requirements
 
 - Bash 3.2 or newer, Git with `rev-parse --path-format`, and jq 1.6 or newer.
