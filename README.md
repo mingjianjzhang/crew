@@ -107,6 +107,12 @@ PRs, review reports, contract gotchas). Omitted `--share` with a non-default
 When basing on a PR head, pass the integration stack id explicitly
 (`--share crew-ipf`). Teardown does not delete the share directory.
 
+A shared task also gets the durable Crew-home playtest root
+`state/playtest/<ID>/`, exposed to the worker as the absolute `PLAYTEST_DIR`.
+Community servers and recording/digest tools should use it as the packet source
+of truth; teardown intentionally retains it. With no share (or `--share none`),
+`PLAYTEST_DIR` is unset and Community keeps its worktree-local `.playtest/`.
+
 For backward compatibility and explicit harness choices, `--agent KIND` without
 `--profile` keeps that CLI's native model and effort defaults. Add `--model` and
 `--effort` to set them explicitly. This route opts out of automatic model selection.

@@ -29,6 +29,12 @@ landed notes and reviews. Write short Markdown updates there when you
 land something others need (see `.crew/share/README.md`). Do not wait,
 poll, or block on siblings; the primary still coordinates.
 
+When `.crew/env` exports `PLAYTEST_DIR`, Community `serve.mjs`, scenarios,
+recording tools, and digests should use that absolute path. Read packets at the
+absolute source-of-truth path and do not copy them into the worktree for the
+happy path. With no shared playtest directory, Community keeps its worktree-
+local `.playtest/` fallback.
+
 Do not spawn Crew tasks or control other herdr panes or agents.
 Do not force-push.
 Do not merge a PR unless the brief or a human decision answer

@@ -8,7 +8,7 @@ usage() {
 }
 [[ ${1:-} != --help ]] || { usage; exit 0; }
 require_runtime
-resume=; id=; project=; kind=; harness=; brief=; bypass=false; profile=; model=; effort=; base_arg=; share_arg=
+resume=; id=; project=; kind=; harness=; brief=; bypass=false; profile=; model=; effort=; base_arg=; share_arg=; playtest_dir=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --unattended-bypass) bypass=true; shift;;
@@ -130,8 +130,12 @@ else
       "$base" "$pr_base" "$default" "$default" >> "$STATE/$id.brief.md"
   fi
   if [[ -n $share ]]; then
+    playtest_dir=$STATE/playtest/$share
+    mkdir -p "$playtest_dir"
     printf '\n## Shared board\n\nSibling workers on this stack share `.crew/share` (Crew home `state/share/%s`). Read it for landed notes and reviews. Write short updates there when you land something others need. Do not wait or poll siblings.\n' \
       "$share" >> "$STATE/$id.brief.md"
+    printf '\n## Shared playtest root\n\nThis task sets `PLAYTEST_DIR=%s`. Community servers, scenarios, recording tools, and digests must honor this absolute path. Read packets at this source-of-truth path; do not copy them into the worktree.\n' \
+      "$playtest_dir" >> "$STATE/$id.brief.md"
   fi
   jq -n --arg id "$id" --arg project "$project" --arg kind "$kind" --arg harness "$harness" \
     --arg path "$intended" --arg base "$base" --arg pr_base "$pr_base" --arg share "$share" \
@@ -192,9 +196,11 @@ if [[ $PHASE == created ]]; then
   jq '{id,kind,harness,model,effort,profile,base,pr_base,share}' "$META" > "$WORKTREE/.crew/task-meta.json"
   touch "$WORKTREE/.crew/status"
   share=$(jq -r '.share // empty' "$META")
+  playtest_dir=
   if [[ -n $share ]]; then
     share_root=$STATE/share/$share
-    mkdir -p "$share_root/updates" "$share_root/reviews"
+    playtest_dir=$STATE/playtest/$share
+    mkdir -p "$share_root/updates" "$share_root/reviews" "$playtest_dir"
     if [[ ! -f $share_root/README.md ]]; then
       cp "$CREW_ROOT/lib/share-readme.md" "$share_root/README.md"
     fi
@@ -204,15 +210,28 @@ if [[ $PHASE == created ]]; then
   port=$(jq -r .port_base "$META")
   # A disk copy lets a harness recover the values if its tool environment filters them.
   # CHROME_DEVTOOLS_AXI_SESSION isolates this task's browser bridge so teardown can stop it.
-  printf 'export PORT=%s\nexport CREW_PORT_BASE=%s\nexport CHROME_DEVTOOLS_AXI_SESSION=%s\n' \
-    "$port" "$port" "$ID" > "$WORKTREE/.crew/env"
+  if [[ -n $playtest_dir ]]; then
+    playtest_export=$(printf '%q' "$playtest_dir")
+    printf 'export PORT=%s\nexport CREW_PORT_BASE=%s\nexport CHROME_DEVTOOLS_AXI_SESSION=%s\nexport PLAYTEST_DIR=%s\n' \
+      "$port" "$port" "$ID" "$playtest_export" > "$WORKTREE/.crew/env"
+  else
+    printf 'export PORT=%s\nexport CREW_PORT_BASE=%s\nexport CHROME_DEVTOOLS_AXI_SESSION=%s\n' \
+      "$port" "$port" "$ID" > "$WORKTREE/.crew/env"
+  fi
   printf '\nCrew assignment: %s (%s). Branch: %s.\nUse PORT=%s and CREW_PORT_BASE=%s. If absent from tool shells, source .crew/env.\nBrowser checks: CHROME_DEVTOOLS_AXI_SESSION=%s is preset; prefer chrome-devtools-axi on PORT. Teardown stops this session and frees the port block.\nUsage: before done, write .crew/usage.json via .crew/crew-usage (input/output/cached tokens, cost if known, PR url for ships). Teardown refuses tasks without valid usage metrics. See docs/usage-schema.md.\n' \
     "$ID" "$KIND" "$BRANCH" "$port" "$port" "$ID" >> "$WORKTREE/.crew/brief.md"
   phase prepared
 fi
 if [[ $PHASE == prepared ]]; then
   port=$(jq -r .port_base "$META")
-  herdr pane run "$PANE" "export PORT=$port CREW_PORT_BASE=$port CHROME_DEVTOOLS_AXI_SESSION=$ID" >/dev/null
+  share=$(jq -r '.share // empty' "$META")
+  pane_exports="export PORT=$port CREW_PORT_BASE=$port CHROME_DEVTOOLS_AXI_SESSION=$ID"
+  if [[ -n $share ]]; then
+    playtest_dir=$STATE/playtest/$share
+    mkdir -p "$playtest_dir"
+    pane_exports="$pane_exports PLAYTEST_DIR=$(printf '%q' "$playtest_dir")"
+  fi
+  herdr pane run "$PANE" "$pane_exports" >/dev/null
   phase starting
   launch_args=()
   while IFS= read -r arg; do launch_args+=("$arg"); done < <(jq -r "(.launch_args // .permission_args)[]" "$META")
