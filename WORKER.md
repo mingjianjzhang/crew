@@ -35,6 +35,33 @@ absolute source-of-truth path and do not copy them into the worktree for the
 happy path. With no shared playtest directory, Community keeps its worktree-
 local `.playtest/` fallback.
 
+## Debugging Agent modes
+
+For `Mode: hosted-debug-session`, phase 0 is an intentional wait for human
+playtesting:
+
+1. Start Community yourself on the task `PORT`, honoring the absolute
+   `PLAYTEST_DIR` from `.crew/env`.
+2. Write a ready stub to `.crew/report.md` and status with the `PORT`, loopback
+   URL, absolute `PLAYTEST_DIR`, and filing locations:
+   `$PLAYTEST_DIR/bugs/<id>/` once File bug exists; recordings are under
+   `$PLAYTEST_DIR` today.
+3. Emit `needs-decision` with key `hosted-session-ready` and stop. Tell the
+   human to playtest this port and tell the primary when filing is complete.
+
+Keep the intentional server available, but do not poll, diagnose, or invent a
+reproduction while waiting. After the primary resumes you through `bin/answer`,
+list/read the shared root, inspect `bugs/`, and run `bug:summary` or the
+available recording digest before diagnosing.
+
+For `Mode: packet-path`, skip the hosted wait and start intake immediately:
+read the absolute packet at its source-of-truth path in the brief. Keep it
+read-only: do not copy it into the worktree or `.crew/input/`. Treat recordings
+and notes as evidence, run only an exact
+repro/replay supplied by the brief, and never invent a playthrough. If the
+evidence cannot support the gate, report findings instead of making a
+speculative fix.
+
 Do not spawn Crew tasks or control other herdr panes or agents.
 Do not force-push.
 Do not merge a PR unless the brief or a human decision answer
