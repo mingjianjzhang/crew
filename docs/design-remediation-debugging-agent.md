@@ -1,37 +1,51 @@
-# Packet-driven remediation in Crew
+# Hosted and packet-driven remediation in Crew
 
 **Status:** revises the merged Astra design (Crew PR 1) toward a thinner foundation. Design / adoption only; no new Crew services.
 
-**Scope:** Crew operating contract for Debugging Agent tasks that consume Community bug packets. Companion: Community `docs/design-file-bug-remediation.md` (simplified). Phase 0: `docs/remediation-loop-gap-map.md`.
+**Scope:** Crew operating contract for hosted Debugging Agent sessions and packet-driven tasks that consume Community bug packets. Companion: Community `docs/design-file-bug-remediation.md` (simplified). Phase 0: `docs/remediation-loop-gap-map.md`.
 
 ## Customer ask
 
-Easy-to-work-with debugging agent + server for logging bugs while playtesting:
+Easy-to-work-with debugging agent + server for logging bugs while playtesting. **“Start a debugging session”** is a valid human ask; the human does not need to discover or supply a packet path first.
 
-1. Player files a bug in-game (Community packet on disk).
-2. Human asks the primary to debug/fix, supplying the packet path (or pasted evidence).
-3. Debugging Agent uses the packet; does **not** invent reproduction.
-4. High confidence → fix PR; else findings / another session via the primary.
+1. Human asks the primary to start a Community debugging session, naming the branch, share, and intent (`fix` or `investigate`).
+2. For a hosted session, the primary spawns a Debugging Agent with the share but without a packet path. The agent starts Community on its task `PORT`, honors `PLAYTEST_DIR`, and reports the URL and absolute root.
+3. Human playtests and files bugs against that `PORT`, tells the primary, and the primary resumes the waiting agent through the Crew answer flow. The agent then reads the shared root and proceeds evidence-first; it does **not** invent reproduction.
+4. If evidence already exists, the human may instead ask for remediation with an absolute packet path (or pasted evidence); the packet-path mode remains available.
+5. High confidence → fix PR; else findings / another session via the primary.
 
 ## Recommendation
 
-Remediation is **one human-authorized Crew task** with two valid outcomes: a verified fix PR, or a useful findings report. The primary binds evidence + revision into a brief, calls existing `bin/spawn`, and stops. No watcher, supervisor, retry daemon, or new task kind.
+Remediation is **one human-authorized Crew task** with two valid intake modes and two valid outcomes: a hosted debug session or an existing packet-path handoff, ending in a verified fix PR or a useful findings report. The primary binds revision, share, intent, and available evidence into a brief, calls existing `bin/spawn`, and stops. No watcher, supervisor, retry daemon, or new task kind.
 
-“Debugging Agent” is a **role described in the brief**, not a profile, harness, or service.
+“Debugging Agent” is a **role described in the brief**, not a profile, harness, or service. In hosted mode the worker intentionally starts the server and pauses for the human; waiting is not polling.
 
 ```text
-Human tests a branch / notices a bug
+Hosted debug session (primary playtest path)
+Human → primary: start Community session (branch / share / fix or investigate)
         ↓
-Human → primary: fix or investigate, with packet path (or paste)
+Primary fills hosted brief (no packet path) → bin/spawn → stops
         ↓
-Primary fills brief → bin/spawn → stops
+Agent starts Community on task PORT with PLAYTEST_DIR
         ↓
-Worker: read packet → baseline evidence → diagnose
+Agent reports PORT / URL / absolute PLAYTEST_DIR → needs-decision wait
+        ↓
+Human playtests and files bugs on that PORT → tells primary → bin/answer
+        ↓
+Agent reads PLAYTEST_DIR/bugs → summary/digest → baseline → diagnose
         ↓
    gate ok (ship)          gate fails / scout
         ↓                        ↓
    fix PR + re-review      .crew/report.md findings
+
+Alternate: packet path already exists
+Human → primary: fix or investigate with absolute packet
         ↓
+Primary fills packet brief → bin/spawn → stops
+        ↓
+Agent reads packet → baseline evidence → diagnose → same gate
+
+Both paths:
 Human decides next (retest, merge, more evidence, new session)
 ```
 
@@ -40,6 +54,10 @@ Human decides next (retest, merge, more evidence, new session)
 | Question | Decision |
 | --- | --- |
 | What triggers work? | Explicit human request to the primary. Filing alone never spawns. |
+| Which intake modes? | Hosted debug session when the human asks to start a session without a packet; packet-path intake when evidence already exists. |
+| Who starts Community in hosted mode? | The Debugging Agent starts Community itself on its task `PORT`, honoring `PLAYTEST_DIR` from `.crew/env`, and reports the loopback URL and absolute root. |
+| What happens before a hosted filing? | The agent writes a ready note and waits via `needs-decision`; the human playtests and files bugs against that `PORT`, then the primary resumes the task through `bin/answer`. |
+| What may the worker do while waiting? | Keep the intentional server available, but do not poll, diagnose, or invent a reproduction. |
 | Fix request kind? | `ship`, allowed to return findings if the gate fails. |
 | Diagnosis-only? | `scout` — report only, even if the cause is obvious. |
 | Profile? | Existing `default` / `mechanics` / `routine` / `planning` by work. No debug-specific profile. |
@@ -74,11 +92,21 @@ Existing authorities stay: `AGENTS.md`, `WORKER.md`, `README.md` dispatch, `prof
 
 ## Primary intake (short)
 
-1. **Intent:** fix (`ship`) vs investigate (`scout`). Bare path with no verb → ask. Do not infer fix authority from a packet existing.
+1. **Intent and mode:** resolve `fix` (`ship`) vs `investigate` (`scout`). If the human asks to **start a debugging session** without a packet path, choose `Mode: hosted-debug-session` and spawn it; do not block on packet path discovery. If evidence already exists, choose `Mode: packet-path` and use its absolute path. A bare path with no verb → ask; do not infer fix authority from a packet existing.
 2. **Revision:** resolve project, original PR (if any), published head branch + SHA, base SHA, human-tested SHA if known. Spawn `--base` that head. Put expected initial HEAD SHA in the brief. Fix PR targets that head.
-3. **Evidence:** absolute readable packet path (Git will not copy `.playtest/`), or paste-only note/stack + any exact repro command the human gives. Record Community contract doc path and `bug:summary` / `npm run recording` as available.
+3. **Evidence and hosted setup:** for packet-path mode, record the absolute readable packet path (Git will not copy `.playtest/`), or paste-only note/stack + any exact repro command the human gives. For hosted mode, record `Packet path: pending`, the share, and the Community project; require the worker to report task `PORT`, loopback URL, and absolute `PLAYTEST_DIR` after starting the server. Record the Community contract doc and `bug:summary` / `npm run recording` as available.
 4. **Scope:** targeted files/functions, allowed changes, non-goals, required checks (`npm run check` for Community ship unless exempted), share id.
-5. **Spawn once and stop.** Example:
+5. **Spawn once and stop.** A hosted session needs no packet path at spawn:
+
+```sh
+bin/spawn --id community-debug-session1 \
+  --project /absolute/path/to/community-repair-workshop \
+  --kind ship --profile mechanics --unattended-bypass \
+  --base crew/ipf --share crew-ipf \
+  --brief state/community-debug-session1.md
+```
+
+For evidence that already exists, use the same command shape with a packet-path brief:
 
 ```sh
 bin/spawn --id ipf-bug17-debug1 \
@@ -88,7 +116,7 @@ bin/spawn --id ipf-bug17-debug1 \
   --brief state/ipf-bug17-debug1.md
 ```
 
-Report task id, kind, expected SHA, packet ref, fix target, share. No wait, pane focus, or scheduled check-in.
+Report task id, kind, expected SHA, mode, packet ref (`pending` for hosted), fix target, and share. The primary does not wait, focus a pane, poll the worker, or schedule a check-in. In hosted mode, after the human files bugs and tells the primary, resume only through the Crew answer flow (`bin/answer`); do not send an out-of-band prompt.
 
 If HEAD ≠ expected SHA at worker start, or fix-target head moved before delivery → `needs-decision revision`, stop.
 
@@ -117,10 +145,15 @@ Share: <id or none>
 Predecessor: <report/PR or none>
 
 ## Evidence
+Mode: <hosted-debug-session | packet-path>
 Note / expectation: <text>
-Packet path: <absolute or none>
+Packet path: <absolute packet path | pending (hosted until the human files a bug)>
+PLAYTEST_DIR: <absolute shared root; required and reported by worker in hosted mode>
+PORT: <task PORT; required and reported by worker in hosted mode>
+URL: <loopback URL reported by worker in hosted mode>
+Filing locations: <$PLAYTEST_DIR/bugs/<id>/ once File bug exists; recordings under $PLAYTEST_DIR today; hosted mode>
 Contract doc: <Community design / PLAYTEST-RECORDINGS path>
-Summary: `npm run bug:summary -- <packet>` when available; else `npm run recording -- <jsonl>`
+Summary: `npm run bug:summary -- <packet>` when available; pending before a hosted filing; else `npm run recording -- <jsonl>`
 Recording: <path inside packet or none>
 Domain replay: <command or unavailable: deferred/not in packet>
 Browser replay: <command or unavailable: deferred/not in packet>
@@ -147,7 +180,13 @@ Write .crew/report.md always. Usage before done/failed.
 
 ## Worker procedure
 
-1. **Intake** — readability of packet, contract version, SHA check. `working` note naming the filed failure.
+0. **Hosted session setup (hosted mode only)** — start the Community server **yourself** on the task `PORT`, honoring the absolute `PLAYTEST_DIR` exported through `.crew/env`. The server start is intentional: learn and report the resolved loopback URL and absolute playtest root. Write a short ready note to working status and a `.crew/report.md` stub (a share update may mirror it) with:
+   - `PORT` and the loopback URL;
+   - absolute `PLAYTEST_DIR`;
+   - filings at `$PLAYTEST_DIR/bugs/<id>/` once File bug exists, with recordings under `$PLAYTEST_DIR` today; and
+   - an instruction for the human to playtest and file bugs against **this** `PORT`, then tell the primary to resume the agent.
+   Emit a `needs-decision` pause keyed `hosted-session-ready` and stop. Keep the intentional server available, but do not poll, inspect for hypothetical bugs, diagnose, or invent a reproduction while waiting. Waiting is not polling. After the human files bugs, the primary answers through the Crew flow (`bin/answer`); only then list/read `PLAYTEST_DIR` (including `bugs/` when present), run `bug:summary` / the recording digest, and continue below. Packet-path mode skips this phase and starts at intake.
+1. **Intake** — for packet-path mode, verify readability of the packet, contract version, and SHA; for hosted mode, verify the answer resumed the task and the reported shared root. Write a `working` note naming the filed failure once evidence is available.
 2. **Baseline** — run `bug:summary` / recording digest. If domain/browser runners exist and artifacts are present, run the relevant ones on the unchanged tree. If only recording+note (Community v1), inspect that evidence and any **exact** repro in the brief (named scenario, test, or command). Do not synthesize a play path.
 3. **Diagnose** — trace cause in targeted code. Scout stops here.
 4. **Repair (ship only)** — narrow patch + focused regression when appropriate. Re-run the same evidence path and required checks.
@@ -198,7 +237,10 @@ Do not poll the share board.
 | Case | Result |
 | --- | --- |
 | Packet on disk, no human ask | No spawn |
-| Human asks ship with packet | One task; correct base/SHA/target/share; primary stops |
+| Human asks to start a Community debugging session without a packet | One hosted task with correct base/SHA/target/share; no packet path required; primary stops |
+| Hosted worker ready | Starts Community on task `PORT`, honors `.crew/env` `PLAYTEST_DIR`, reports PORT + URL + absolute root and filing locations, then `needs-decision` wait |
+| Human asks ship with packet | One packet-path task; correct base/SHA/target/share; primary stops |
+| Hosted human files after waiting | Human tells primary; primary uses `bin/answer`; worker then reads `PLAYTEST_DIR` / `bugs/` and runs summary/digest |
 | `.playtest` not in git | Worker uses absolute source path; leaves it unchanged |
 | SHA mismatch / target moved | `needs-decision`; no silent rebase/force-push |
 | v1 packet (note + recording only) | Summary used; no invented repro; fix only if exact brief repro + checks carry the gate; else findings |
@@ -224,7 +266,10 @@ Verify with `git diff --check` and a human-directed smoke once Community filing 
 
 | Action | Expected | Result | Additional thoughts |
 | --- | --- | --- | --- |
-| Ask primary to fix with packet path | One spawn; primary stops | | |
+| Ask primary to start a Community session without a packet | One hosted spawn with share; primary stops without requesting a path | | |
+| Hosted worker starts | Ready note has PORT, URL, absolute PLAYTEST_DIR, filing locations; worker waits via `needs-decision` | | |
+| Human playtests and files a bug on the reported PORT | Human tells primary; primary resumes only through `bin/answer`; worker reads root and summarizes | | |
+| Ask primary to fix with packet path | One packet-path spawn; primary stops | | |
 | v1 packet, no exact repro | Findings naming missing replay / ask | | |
 | Gate-passing ship | Stacked fix PR + re-review note | | |
 | Follow-up with new evidence | New task id, same share, prior report linked | | |

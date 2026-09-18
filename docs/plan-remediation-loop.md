@@ -44,18 +44,45 @@ into the worker environment (and document it in `WORKER.md` / brief overlay). Te
 
 **Community change (Milestone A2):** `scripts/serve.mjs` already accepts `createServer({ playtestDir })` for tests; wire CLI / `npm start` / scenario to honor `PLAYTEST_DIR` (absolute path only, create if missing, retain path-safety checks). Log the resolved absolute playtest dir at server start.
 
-**Handoff:** primary puts the absolute packet path in the Debugging Agent brief, e.g. `/…/state/playtest/crew-ipf/bugs/<id>/`. Worker reads in place; writes digests/reports under its own `.crew/` only.
+### Hosted debug session (primary playtest path)
+
+A human may ask the primary to **start a debugging session** for Community with a branch, share, and intent (`fix` or `investigate`) but no packet path. The primary does not block on path discovery: it spawns a Debugging Agent with the same `--share` and a hosted-session brief. The agent starts Community itself on its task `PORT`, honors `PLAYTEST_DIR` from `.crew/env`, and reports the absolute playtest root and loopback URL.
+
+Before investigating, the agent writes a short ready note to task status and `.crew/report.md` (a share update may mirror it) containing:
+
+- `PORT` and the loopback URL;
+- the absolute `PLAYTEST_DIR`;
+- where filings will land: `$PLAYTEST_DIR/bugs/<id>/` once File bug exists, with recordings under `$PLAYTEST_DIR` today; and
+- an instruction for the human to playtest and file bugs against **this** `PORT`, then tell the primary to resume the agent.
+
+The agent then stops with `needs-decision`. It does not poll, invent a reproduction, or diagnose while waiting. After the human files bugs and tells the primary, the primary resumes the task through the Crew answer flow (`bin/answer`). Only then does the agent list/read `PLAYTEST_DIR` (including `bugs/` when present), run the available summary or recording digest, and enter the existing evidence-first gate.
+
+### Packet-path handoff (when evidence already exists)
+
+When a human already has an absolute packet from another task, the primary may use the packet-path mode instead. It puts the absolute packet path in the Debugging Agent brief, e.g. `/…/state/playtest/<share>/bugs/<id>/`. The worker reads it in place and writes digests/reports under its own `.crew/` only; it must not copy the packet into its worktree.
 
 ```text
-Human / coding agent playtests (PORT from that task)
+Hosted debug session (primary playtest path)
+Human asks primary to start a session (branch / share / fix or investigate)
         ↓
-serve.mjs writes sealed packet → state/playtest/<share>/bugs/<id>/   ← SoT
+Primary spawns Debugging Agent with --share (no packet path required)
         ↓
-Primary spawns Debugging Agent (new worktree, --base tested head, same --share)
+Agent starts Community on task PORT with PLAYTEST_DIR
         ↓
-Brief: Packet path = absolute SoT path (no copy)
+Agent reports PORT / URL / absolute PLAYTEST_DIR → needs-decision wait
         ↓
-Agent runs bug:summary / later replays against that path; code edits stay in its worktree
+Human playtests and files bugs on that PORT → tells primary → bin/answer
+        ↓
+Agent reads PLAYTEST_DIR/bugs and runs summary/digest → evidence gate
+        ↓
+Fix PR when justified, otherwise findings
+
+Alternate: packet path already exists
+Human supplies absolute packet → primary spawns with packet-path brief
+        ↓
+Agent runs bug:summary / supplied replay against the shared path (no copy)
+        ↓
+Evidence gate → fix PR or findings
 ```
 
 ---
@@ -126,22 +153,31 @@ Milestone F  Domain replay / browser replay (Next)      [Community, then Crew ga
 
 Depends on A (path convention) and at least B (readable packet). Can land in parallel with C if briefs use CLI-created packets for smoke.
 
-**Acceptance:** primary can spawn a ship/scout with packet path; worker reads shared packet without copying; findings-only path works when evidence is thin.
+**Acceptance:** primary can spawn either packet-path work (with an absolute packet) or a hosted debug session without a packet path. In hosted mode, the agent starts the server, reports `PORT` + `PLAYTEST_DIR`, waits for an answer, then reads the shared root; in packet-path mode, the worker reads the shared packet without copying. The findings-only path works when evidence is thin.
 
 ### Milestone E - Integration smoke
 
-Human-directed, one afternoon:
+Human-directed, one afternoon. The primary smoke path is hosted:
 
-1. Feature worker on a share files a bug while reproducing on its PORT.
-2. Primary spawns Debugging Agent with `--base` tested head, same `--share`, absolute packet path.
-3. Confirm summary runs; agent does not invent repro; either narrow fix PR or clean findings.
-4. Teardown feature worker; confirm packet still on shared root; debug agent still readable.
+1. Human asks the primary to start a Community debugging session with a branch, share, and `fix` or `investigate` intent, but no packet path.
+2. Primary spawns the Debugging Agent with `--share`; the agent starts Community on its task `PORT`, honoring `PLAYTEST_DIR`.
+3. Agent reports `PORT` + loopback URL + absolute `PLAYTEST_DIR`, records where filings/recordings land, and waits for an answer.
+4. Human playtests and files a bug against that `PORT`, then tells the primary.
+5. Primary uses `bin/answer`; the agent reads the shared root and `bugs/` when present, runs summary/digest, and does not invent repro.
+6. Confirm either a narrow fix PR or clean findings according to the evidence gate; teardown must leave the shared root intact.
+
+The packet-path mode remains the alternate smoke path when evidence already exists: primary supplies the absolute packet path at spawn, and the agent reads it without copying.
+
+**Acceptance:** hosted mode starts the server, reports `PORT` + `PLAYTEST_DIR`, waits for the human answer, then reads the shared root; packet-path mode still reads an existing packet and follows the same evidence gate.
 
 | Smoke check | Result | Additional thoughts |
 | --- | --- | --- |
-| File bug lands under `state/playtest/<share>/bugs/<id>/` | | |
-| Debug agent reads absolute path without copy | | |
-| Teardown of feature worktree leaves packet intact | | |
+| Hosted agent reports task `PORT`, loopback URL, and absolute `PLAYTEST_DIR` | | |
+| Human files a bug under `state/playtest/<share>/bugs/<id>/` on that PORT | | |
+| Primary resumes the waiting agent through `bin/answer` | | |
+| Agent reads shared root without inventing repro or copying packets | | |
+| Teardown of feature worktree leaves the shared root intact | | |
+| Packet-path alternate reads an existing absolute packet | | |
 | Fix PR or findings-only per gate | | |
 
 ### Milestone F - Next (after v1 loop works)
@@ -164,9 +200,22 @@ Follow Community design PRs 4–5 (domain, then browser replay). Only then tight
 
 ## Brief evidence fields (workers)
 
-Always prefer:
+Use the mode that matches the handoff. A hosted brief may keep the packet path pending until the human files a bug:
 
 ```text
+Mode: hosted-debug-session
+Packet path: pending
+PLAYTEST_DIR: /absolute/.../state/playtest/<share>   # required; worker reports it
+PORT: <task PORT>                                    # required; worker reports it
+URL: http://127.0.0.1:<PORT>/                         # worker reports loopback URL
+Filings: $PLAYTEST_DIR/bugs/<id>/ once File bug exists; recordings under $PLAYTEST_DIR today
+Summary: pending until the human files a bug
+```
+
+When evidence already exists, use:
+
+```text
+Mode: packet-path
 Packet path: /absolute/.../state/playtest/<share>/bugs/<id>/
 PLAYTEST_DIR: /absolute/.../state/playtest/<share>
 Summary: npm run bug:summary -- <packet path>
