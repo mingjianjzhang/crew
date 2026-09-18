@@ -140,6 +140,8 @@ class CrewTest(unittest.TestCase):
         env = (self.worktree() / '.crew/env').read_text()
         self.assertIn('export PORT=5100', env)
         self.assertIn('export CHROME_DEVTOOLS_AXI_SESSION=one', env)
+        self.assertNotIn('PLAYTEST_DIR', env)
+        self.assertNotIn('PLAYTEST_DIR', agent['shell_command'])
         self.assertEqual(len(agent['prompts']), 1)
         self.cli('spawn', '--resume', 'one')
         self.assertEqual(len(json.loads((self.runtime / 'crew-one.json').read_text())['prompts']), 1)
@@ -161,6 +163,15 @@ class CrewTest(unittest.TestCase):
         self.assertEqual(meta['base'], 'origin/crew/ipf')
         self.assertEqual(meta['pr_base'], 'crew/ipf')
         self.assertEqual(meta['share'], 'crew-ipf')
+        playtest_dir = self.crew / 'state/playtest/crew-ipf'
+        self.assertTrue(playtest_dir.is_dir())
+        env = (self.worktree('stacked') / '.crew/env').read_text()
+        playtest_shell_path = str(playtest_dir).replace(' ', '\\ ')
+        self.assertIn(f'export PLAYTEST_DIR={playtest_shell_path}', env)
+        agent = json.loads((self.runtime / 'crew-stacked.json').read_text())
+        self.assertIn(f'PLAYTEST_DIR={playtest_shell_path}', agent['shell_command'])
+        brief = (self.crew / 'state/stacked.brief.md').read_text()
+        self.assertIn(f'PLAYTEST_DIR={playtest_dir}', brief)
         create = next(c for c in self.calls() if c[:2] == ['worktree', 'create'])
         self.assertEqual(create[create.index('--base') + 1], 'origin/crew/ipf')
         brief = (self.crew / 'state/stacked.brief.md').read_text()
@@ -197,6 +208,8 @@ class CrewTest(unittest.TestCase):
                  '--base', 'crew/ipf', '--share', 'none')
         self.assertIsNone(self.meta('solo')['share'])
         self.assertFalse((self.worktree('solo') / '.crew/share').exists())
+        self.assertNotIn('PLAYTEST_DIR', (self.worktree('solo') / '.crew/env').read_text())
+        self.assertNotIn('PLAYTEST_DIR', json.loads((self.runtime / 'crew-solo.json').read_text())['shell_command'])
 
     def test_release_resources_stops_axi_and_frees_ports(self):
         axi_log = self.root / 'axi-stop.log'
@@ -311,7 +324,10 @@ class CrewTest(unittest.TestCase):
         self.assertIn('gone', result)
 
     def test_scout_teardown_checks_then_archives(self):
-        self.spawn()
+        self.cli('spawn', '--id', 'one', '--project', str(self.project), '--kind', 'scout',
+                 '--agent', 'claude', '--brief', str(self.brief), '--share', 'retained')
+        marker = self.crew / 'state/playtest/retained/marker.txt'
+        marker.write_text('keep packet evidence')
         self.cli('teardown', 'one', ok=False)  # live worker
         self.agent('done')
         self.cli('teardown', 'one', ok=False)  # no report / no usage
@@ -326,6 +342,7 @@ class CrewTest(unittest.TestCase):
         self.assertTrue((self.crew / 'state/usage.jsonl').exists())
         self.assertFalse((self.crew / 'state/one.meta').exists())
         self.assertFalse((self.crew / 'state/worktrees/one').exists())
+        self.assertEqual(marker.read_text(), 'keep packet evidence')
         self.spawn(ok=False)  # archived ids cannot be reused
 
     def test_teardown_requires_usage_even_with_discard(self):

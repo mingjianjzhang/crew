@@ -3,6 +3,11 @@
 Workers on the same stack share this directory via `.crew/share`.
 It lives in the Crew home (`state/share/<id>/`), not inside any one Git worktree.
 
+Tasks on this share also use the durable playtest source of truth at
+`state/playtest/<id>/`, exposed as the absolute `PLAYTEST_DIR`. Community
+servers and recording/digest tools should read and write packets there; teardown
+retains this root, and packets should not be copied into a worktree.
+
 ## Rules
 
 - Write useful notes other workers (and the primary) may need.
