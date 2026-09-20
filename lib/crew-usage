@@ -8,17 +8,21 @@ usage_path=$crew_dir/usage.json
 
 usage_help() {
   cat <<'EOF' >&2
-Usage: .crew/crew-usage --input N --output N [options]
+Usage: .crew/crew-usage [--auto | --input N --output N] [options]
 
-Required:
-  --input N              Gross or total input tokens
-  --output N             Output tokens
+Token modes:
+  --auto                 Discover Claude session JSONL, sum tokens, price costUsd
+  --input N --output N   Manual token counts (required unless --auto)
+
+When --input/--output are omitted and the harness is Claude (or
+$CLAUDE_CODE_SESSION_ID is set), --auto is implied.
 
 Optional:
+  --transcript PATH      Claude session JSONL (skips discovery; implies --auto)
   --cached-read N        Cached read / cache hit tokens (default 0)
   --cache-creation N     Cache write / creation tokens (default 0)
   --reasoning N          Reasoning tokens (default 0)
-  --cost-usd X           Dollar cost (omit for null)
+  --cost-usd X           Dollar cost (omit for null; --auto fills when priced)
   --source harness|estimated|unavailable   (default harness)
   --pr-url URL           Final PR https URL
   --pr-number N          PR number
@@ -37,9 +41,12 @@ EOF
 input=; output=; cached_read=0; cache_creation=0; reasoning=0
 cost_usd=; cost_set=false; source=harness
 pr_url=; pr_number=; model=; effort=; harness=; kind=; task_id=; notes=
+auto=false; transcript=
 
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --auto) auto=true; shift;;
+    --transcript) transcript=$2; auto=true; shift 2;;
     --input) input=$2; shift 2;;
     --output) output=$2; shift 2;;
     --cached-read) cached_read=$2; shift 2;;
@@ -59,28 +66,6 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage_help; exit 2;;
   esac
 done
-
-[[ -n $input && -n $output ]] || { echo 'Required: --input and --output.' >&2; exit 2; }
-[[ $input =~ ^[0-9]+([.][0-9]+)?$ && $output =~ ^[0-9]+([.][0-9]+)?$ ]] ||
-  { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
-for n in "$cached_read" "$cache_creation" "$reasoning"; do
-  [[ $n =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
-done
-case $source in harness|estimated|unavailable) ;; *)
-  echo 'source must be harness, estimated, or unavailable.' >&2; exit 2;;
-esac
-if $cost_set; then
-  [[ $cost_usd =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'costUsd must be a non-negative number.' >&2; exit 2; }
-fi
-if [[ -n $pr_url ]]; then
-  [[ $pr_url =~ ^https:// ]] || { echo 'pr url must be https.' >&2; exit 2; }
-fi
-if [[ -n $pr_number ]]; then
-  [[ $pr_number =~ ^[0-9]+$ ]] || { echo 'pr number must be an integer.' >&2; exit 2; }
-fi
-if [[ -n $notes ]]; then
-  [[ $notes != *$'\n'* && ${#notes} -le 500 ]] || { echo 'notes must be one short line.' >&2; exit 2; }
-fi
 
 # Prefer spawn's task-meta sidecar; fall back to the brief assignment line.
 if [[ -f $crew_dir/task-meta.json ]]; then
@@ -108,6 +93,200 @@ fi
 case $kind in ship|scout) ;; *) echo 'kind must be ship or scout.' >&2; exit 2;; esac
 [[ -n $harness ]] || harness=unknown
 [[ -n $model ]] || model=unknown
+
+# Claude project dir slug: replace / and . with - (observed Claude Code layout).
+claude_project_slug() {
+  local cwd=${1:-$PWD}
+  printf '%s' "$cwd" | sed -e 's|/|-|g' -e 's|\.|-|g' -e 's| |-|g'
+}
+
+# Locate this worker's Claude session JSONL.
+find_claude_transcript() {
+  local session_id=${CLAUDE_CODE_SESSION_ID:-}
+  local projects=${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}
+  local slug candidate
+
+  if [[ -n $transcript ]]; then
+    [[ -f $transcript ]] || { echo "Transcript not found: $transcript" >&2; return 1; }
+    printf '%s\n' "$transcript"
+    return 0
+  fi
+
+  slug=$(claude_project_slug "$PWD")
+  if [[ -n $session_id ]]; then
+    candidate=$projects/$slug/$session_id.jsonl
+    if [[ -f $candidate ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    # Session id is unique; search projects tree if slug guess misses.
+    candidate=$(find "$projects" -type f -name "$session_id.jsonl" 2>/dev/null | head -n1 || true)
+    if [[ -n $candidate && -f $candidate ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    echo "Claude transcript not found for session $session_id under $projects" >&2
+    return 1
+  fi
+
+  # No session id: newest JSONL in this cwd's project dir.
+  local dir=$projects/$slug
+  if [[ ! -d $dir ]]; then
+    echo "Claude project dir not found: $dir (set CLAUDE_CODE_SESSION_ID or pass --transcript)" >&2
+    return 1
+  fi
+  candidate=$(find "$dir" -maxdepth 1 -type f -name '*.jsonl' -print0 2>/dev/null \
+    | xargs -0 ls -t 2>/dev/null | head -n1 || true)
+  if [[ -z $candidate || ! -f $candidate ]]; then
+    echo "No Claude transcript JSONL under $dir" >&2
+    return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
+# Sum deduped usage and price against Anthropic list rates (platform.claude.com).
+# Rates: input, output, cache_read, cache_write_5m, cache_write_1h ($/MTok).
+summarize_claude_transcript() {
+  local path=$1
+  # -n + inputs reads every JSONL line (plain jq would skip the first as `.`).
+  jq -n -c --arg fallback_model "$model" '
+    def rates:
+      [
+        {k:"claude-fable-5-1",   rin:10,   rout:50,   cr:0.25, c5:12.5,  c1:20},
+        {k:"claude-mythos-5-1",  rin:10,   rout:50,   cr:0.25, c5:12.5,  c1:20},
+        {k:"claude-fable-5",     rin:10,   rout:50,   cr:1,    c5:12.5,  c1:20},
+        {k:"claude-mythos-5",    rin:10,   rout:50,   cr:1,    c5:12.5,  c1:20},
+        {k:"claude-opus-5",      rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
+        {k:"claude-opus-4-8",    rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
+        {k:"claude-opus-4-7",    rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
+        {k:"claude-opus-4-6",    rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
+        {k:"claude-opus-4-5",    rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
+        {k:"claude-opus-4-1",    rin:15,   rout:75,   cr:1.5,  c5:18.75, c1:30},
+        {k:"claude-opus-4",      rin:15,   rout:75,   cr:1.5,  c5:18.75, c1:30},
+        {k:"claude-sonnet-5",    rin:2,    rout:10,   cr:0.2,  c5:2.5,   c1:4},
+        {k:"claude-sonnet-4-6",  rin:3,    rout:15,   cr:0.3,  c5:3.75,  c1:6},
+        {k:"claude-sonnet-4-5",  rin:3,    rout:15,   cr:0.3,  c5:3.75,  c1:6},
+        {k:"claude-sonnet-4",    rin:3,    rout:15,   cr:0.3,  c5:3.75,  c1:6},
+        {k:"claude-haiku-4-5",   rin:1,    rout:5,    cr:0.1,  c5:1.25,  c1:2},
+        {k:"claude-haiku-3-5",   rin:0.8,  rout:4,    cr:0.08, c5:1,     c1:1.6},
+        {k:"claude-3-5-haiku",   rin:0.8,  rout:4,    cr:0.08, c5:1,     c1:1.6}
+      ];
+    def norm: ascii_downcase | gsub("_"; "-");
+    def rate_for($m):
+      ($m | norm) as $id
+      | [rates[] | . as $r | select($id == $r.k or ($id | startswith($r.k + "-")))][0] // null;
+    def price($u; $r):
+      if $r == null then null else
+        (
+          (($u.input_tokens // 0) * $r.rin)
+          + (($u.output_tokens // 0) * $r.rout)
+          + (($u.cache_read_input_tokens // 0) * $r.cr)
+          + (($u.cache_creation.ephemeral_5m_input_tokens // 0) * $r.c5)
+          + (($u.cache_creation.ephemeral_1h_input_tokens // 0) * $r.c1)
+        ) / 1000000
+      end;
+
+    [ inputs
+      | select(.message.usage != null and .message.id != null)
+      | {
+          id: .message.id,
+          model: (.message.model // .model // $fallback_model // "unknown"),
+          u: .message.usage
+        }
+    ]
+    | unique_by(.id)
+    | if length == 0 then
+        error("no message.usage records in transcript")
+      else . end
+    | {
+        input: (map(.u.input_tokens // 0) | add // 0),
+        output: (map(.u.output_tokens // 0) | add // 0),
+        cachedRead: (map(.u.cache_read_input_tokens // 0) | add // 0),
+        cacheCreation: (map(.u.cache_creation_input_tokens // 0) | add // 0),
+        reasoning: 0,
+        costUsd: (
+          map(price(.u; rate_for(.model)))
+          | if any(. == null) then null
+            else ((add // 0) * 100000000 | round) / 100000000
+            end
+        ),
+        unpriced: (map(select(rate_for(.model) == null).model) | unique)
+      }
+  ' "$path"
+}
+
+run_claude_auto() {
+  local path summary auto_notes unpriced
+  path=$(find_claude_transcript) || return 1
+  summary=$(summarize_claude_transcript "$path") || {
+    echo "Failed to summarize Claude transcript: $path" >&2
+    return 1
+  }
+
+  input=$(jq -r '.input' <<<"$summary")
+  output=$(jq -r '.output' <<<"$summary")
+  cached_read=$(jq -r '.cachedRead' <<<"$summary")
+  cache_creation=$(jq -r '.cacheCreation' <<<"$summary")
+  reasoning=$(jq -r '.reasoning' <<<"$summary")
+
+  if ! $cost_set; then
+    local computed
+    computed=$(jq -r '.costUsd // empty' <<<"$summary")
+    if [[ -n $computed && $computed != null ]]; then
+      cost_usd=$computed
+      cost_set=true
+    fi
+  fi
+
+  unpriced=$(jq -r '.unpriced | join(",")' <<<"$summary")
+  auto_notes="claude JSONL auto: $(basename "$path")"
+  if [[ -n $unpriced ]]; then
+    auto_notes="$auto_notes; unpriced models: $unpriced (costUsd null)"
+  else
+    auto_notes="$auto_notes; cost from Anthropic list rates (validated vs claude_code.cost.usage)"
+  fi
+  if [[ -z $notes ]]; then
+    notes=$auto_notes
+  fi
+  echo "Auto usage from $path" >&2
+}
+
+# Imply --auto when token flags omitted for Claude workers.
+if ! $auto && [[ -z $input && -z $output ]]; then
+  if [[ $harness == claude || -n ${CLAUDE_CODE_SESSION_ID:-} || -n $transcript ]]; then
+    auto=true
+  fi
+fi
+
+if $auto; then
+  if [[ -n $input || -n $output ]]; then
+    echo '--auto cannot be combined with --input/--output.' >&2
+    exit 2
+  fi
+  run_claude_auto || exit 1
+fi
+
+[[ -n $input && -n $output ]] || { echo 'Required: --input and --output (or --auto for Claude).' >&2; exit 2; }
+[[ $input =~ ^[0-9]+([.][0-9]+)?$ && $output =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+  { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
+for n in "$cached_read" "$cache_creation" "$reasoning"; do
+  [[ $n =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
+done
+case $source in harness|estimated|unavailable) ;; *)
+  echo 'source must be harness, estimated, or unavailable.' >&2; exit 2;;
+esac
+if $cost_set; then
+  [[ $cost_usd =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo 'costUsd must be a non-negative number.' >&2; exit 2; }
+fi
+if [[ -n $pr_url ]]; then
+  [[ $pr_url =~ ^https:// ]] || { echo 'pr url must be https.' >&2; exit 2; }
+fi
+if [[ -n $pr_number ]]; then
+  [[ $pr_number =~ ^[0-9]+$ ]] || { echo 'pr number must be an integer.' >&2; exit 2; }
+fi
+if [[ -n $notes ]]; then
+  [[ $notes != *$'\n'* && ${#notes} -le 500 ]] || { echo 'notes must be one short line.' >&2; exit 2; }
+fi
 
 recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

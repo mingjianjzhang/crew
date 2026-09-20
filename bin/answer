@@ -1,7 +1,41 @@
 #!/usr/bin/env bash
+# Deliver a decision answer and wake the worker to continue.
+# Done-only / merge closeout belongs to bin/finish (zero agent tokens).
 source "$(dirname "$0")/../lib/common.sh"
-[[ ${1:-} != --help ]] || { echo 'Usage: bin/answer ID KEY TEXT|@FILE|--deliver'; exit 0; }
-[[ $# == 3 ]] || die 'Usage: bin/answer ID KEY TEXT|@FILE|--deliver'
+
+usage() {
+  echo 'Usage: bin/answer [--force] ID KEY TEXT|@FILE|--deliver'
+  echo '  Wakes the worker to continue. For merge/done-only closeout use bin/finish.'
+  echo '  --force: allow a note that looks like done-only closeout (still wakes the agent).'
+}
+
+# True when TEXT is merge/done-only closeout with no explicit continue reason.
+# Orb2 paid ~$0.58 / ~451k cache because answer always herdr agent prompts.
+looks_done_only_closeout() {
+  local text=$1 lower
+  lower=$(printf '%s\n' "$text" | tr '[:upper:]' '[:lower:]')
+  # Explicit continue / fix / redesign / resume language → worker must wake.
+  if printf '%s\n' "$lower" | grep -Eq \
+    'worker must continue|must continue|please continue|\bcontinue\b|\bfix\b|redesign|revise|re-?open|resume|bugs filed|update the pr|push (a |the )?fix|address review|keep working|do not (finish|teardown|close)'; then
+    return 1
+  fi
+  # Done-only / farewell patterns (merge confirm, emit done, usage, goodbye).
+  printf '%s\n' "$lower" | grep -Eq \
+    'merged|merge confirmed|human merge|owner merge|emit done|record done|write usage|refresh usage|usage.*(done|teardown)|done.*(usage|teardown)|close ?out|tear ?down|goodbye|farewell|done-only|no (further|more) work|primary finish'
+}
+
+[[ ${1:-} != --help ]] || { usage; exit 0; }
+
+force=
+# Only --force is a flag; --deliver remains a positional answer token.
+while [[ ${1:-} == --force ]]; do force=1; shift; done
+# Also allow: bin/answer ID KEY --force TEXT
+if [[ ${3:-} == --force && $# -ge 4 ]]; then
+  force=1
+  set -- "$1" "$2" "${@:4}"
+fi
+[[ $# == 3 ]] || { usage >&2; die 'ID, KEY, and TEXT|@FILE|--deliver are required.'; }
+
 require_runtime
 valid_id "$1"; valid_key "$2"
 lock "$STATE/$1.lock"; load_task "$1"; key=$2; answer=$3
@@ -11,14 +45,29 @@ verify_worktree
 log=$WORKTREE/.crew/status
 awk -v key="$key" '$2 == "needs-decision:" && $3 == key {found=1} END {exit !found}' "$log" || die "No recorded decision: $key"
 file=$WORKTREE/.crew/answers/$key.md
+
 if [[ $answer == --deliver ]]; then
   [[ -s $file && ! -L $file ]] || die 'No saved answer to deliver.'
+  check_text=$(cat "$file")
+  if looks_done_only_closeout "$check_text" && [[ -z $force ]]; then
+    die "Saved answer looks like done-only closeout (would wake the agent for a farewell tax). Use: bin/finish $ID --decision $key \"…\". To wake anyway: bin/answer --force $ID $key --deliver."
+  fi
 else
   temp=$(mktemp "$WORKTREE/.crew/answers/.answer.XXXXXX")
   if [[ $answer == @* ]]; then cat "${answer#@}" > "$temp"; else printf '%s\n' "$answer" > "$temp"; fi
   [[ -s $temp ]] || { rm "$temp"; die 'An answer cannot be empty.'; }
+  check_text=$(cat "$temp")
+  if looks_done_only_closeout "$check_text" && [[ -z $force ]]; then
+    rm -f "$temp"
+    die "Answer looks like done-only closeout (would wake the agent for a farewell tax). Use: bin/finish $ID --decision $key \"…\". If the worker must continue, rewrite the note with an explicit continue/fix/redesign reason, or pass --force."
+  fi
   mv "$temp" "$file"
 fi
+
+if looks_done_only_closeout "$check_text" && [[ -n $force ]]; then
+  echo "$ID: warning: --force waking agent on a done-only-looking note; prefer bin/finish when no further worker work." >&2
+fi
+
 live=$(agent_state)
 if [[ $live == idle || $live == done ]]; then
   if herdr agent prompt "$AGENT" "Decision $key is answered in .crew/answers/$key.md. Read it and continue the brief."; then

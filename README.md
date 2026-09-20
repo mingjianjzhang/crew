@@ -148,6 +148,7 @@ bin/status --ack
 bin/answer first-scout scope 'Limit the investigation to the preview server.'
 bin/answer first-scout scope @/path/to/answer.md
 bin/answer first-scout scope --deliver
+bin/finish first-scout --decision pr-review 'Merged; primary closeout.'
 bin/teardown first-scout
 ```
 
@@ -163,6 +164,11 @@ answer remains pending until you explicitly use `--deliver`. Repeating delivery
 can cause another worker turn, so do not retry an already confirmed answer.
 A transport failure can also leave delivery uncertain; inspect the pane before
 retrying. Crew never retries or wakes the primary on its own.
+
+Use `bin/answer` when the worker must **continue**. For merge/done-only
+closeout, use `bin/finish` instead - it never prompts the agent. Farewell-shaped
+answer notes are refused (override with `--force` only if you truly need a wake).
+See `docs/crew-instruments.md` and `docs/finish-no-agent-closeout.md`.
 
 Teardown archives the record in `data/<id>/` and removes the worktree and local
 branch. It refuses dirty worktrees, live or unknown agents, unlanded ship work,
@@ -193,8 +199,10 @@ discarded project changes.
 | `harnesses.tsv` | Permission and model argument templates, never shell-evaluated |
 | `bin/spawn` | Preflight, port reservation, worktree creation, agent launch |
 | `bin/status` | Durable board plus live hints |
-| `bin/answer` | Save a human answer and attempt delivery once |
+| `bin/answer` | Save a human answer and wake the worker to continue |
+| `bin/finish` | Zero-token merge/done-only closeout (no agent prompt) |
 | `bin/teardown` | Landing checks, archive, and removal |
+| `docs/crew-instruments.md` | Post-wave brief/closeout instruments |
 | `lib/common.sh` | Shared locking, JSON metadata, Git identity checks, log reduction |
 | `lib/crew-status` | Tiny append helper copied into each worktree |
 | `lib/crew-usage` | Writes validated `.crew/usage.json` (`crew-usage/v1`) |

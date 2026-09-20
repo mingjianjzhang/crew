@@ -65,6 +65,33 @@ Write a brief with:
 When a brief requires a browser check, say to use `chrome-devtools-axi`
 on the task `PORT` (WORKER.md already requires that tool).
 
+Keep briefs lean for context cost (see `docs/context-budget.md`).
+Crew instruments after the isometric-demo wave (`docs/crew-instruments.md`):
+
+1. **Zero-Token Closeout** - On human merge (or any done-only closeout):
+   use `bin/finish`, never `bin/answer`. Finish resolves the decision,
+   appends done, and teardowns **without prompting the worker**. Tip-sync
+   the worktree to the merged head first when needed. `bin/answer` refuses
+   farewell-shaped notes unless `--force` plus an explicit continue reason.
+2. **Anti-Goal Block** - Contested UI implement briefs after a visual scout
+   must list concrete anti-goals (footprint, must-not-obscure, banned chrome
+   families). Scout approval alone does not carry constraints.
+3. **Edit-Map Brief** - Name exact files/line ranges and call sites; ban
+   whole-file discovery-cat of `app.js` / DEMO / sibling modules. Weak
+   "modules you need" allowlists are non-compliant.
+4. **Thin TDD Contract** - Before expensive ships, publish must-stay-green
+   cites, tests to add, run commands, and seam refs. Worker starts
+   red/green, not archaeology.
+5. **Taste Freeze Gate** - Do not spawn Astra/Fable xhigh for contested
+   chrome/plate until an owner wireframe or plate-ref pack exists on the
+   share board. Ban Imagine comps as apply briefs; escalate to xhigh only
+   when a written fidelity gate fails.
+
+Also: pin an allowlist of files/sections; do not say "read COMMON / UX /
+ARCHITECTURE in full" unless that doc is the task. Defer browser checks
+to a short end pass; Rules-only ships omit AXI unless the happy path is
+truly UI. Prefer a new short follow-up task over extending a long session.
+
 Call `bin/spawn` with the brief.
 Optionally print `bin/status`, report the dispatch, and end your turn.
 
@@ -113,13 +140,25 @@ Status files are the durable record. herdr state is a live hint.
 A herdr agent marked done has stopped working; only a done event in
 the task log means its deliverable is complete.
 
-When the human supplies a decision, use `bin/answer`.
+When the human supplies a decision that requires the **worker to continue**,
+use `bin/answer` (fix PR, redesign, hosted-session resume, etc.).
 If delivery remains pending, report why. Retry only on a later request.
 Never send other prompts, steering messages, or keystrokes to workers.
+Do not use `bin/answer` for merge/done-only notes ("merged", "emit done",
+"refresh usage") - that is the farewell tax. `bin/answer` refuses those
+shapes; rewrite with an explicit continue reason or use `bin/finish`.
+
+When the human has **merged** (or otherwise wants closeout with no further
+worker work), use `bin/finish ID [--decision KEY] NOTE` instead of answering.
+Finish never calls `herdr agent prompt`. It requires an existing valid
+`.crew/usage.json`, appends done, and runs teardown. Do not wake Fable,
+Astra, or any other model just to emit done/usage.
 
 ## Removing tasks
 
-Use `bin/teardown`; do not remove worktrees or branches manually.
+Prefer `bin/finish` for merge/done-only closeout (zero agent tokens).
+Use `bin/teardown` directly when the task is already done in the status
+log. Do not remove worktrees or branches manually.
 Never pass `--discard` without an explicit human instruction to discard
 that task in the current conversation.
 

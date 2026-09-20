@@ -115,7 +115,13 @@ class CrewTest(unittest.TestCase):
 
     def test_outside_herdr_refuses_all_scripts(self):
         env = dict(self.env, HERDR_ENV='0')
-        for name, args in [('spawn', []), ('status', []), ('answer', ['one', 'key', 'text']), ('teardown', ['one'])]:
+        for name, args in [
+            ('spawn', []),
+            ('status', []),
+            ('answer', ['one', 'key', 'text']),
+            ('finish', ['one', 'done note']),
+            ('teardown', ['one']),
+        ]:
             result = self.cli(name, *args, ok=False, env=env)
             self.assertIn('herdr-managed pane', result.stderr)
         self.assertFalse((self.runtime / 'calls.jsonl').exists())
@@ -312,6 +318,41 @@ class CrewTest(unittest.TestCase):
         self.cli('answer', 'one', '../unsafe', 'no', ok=False)
         self.cli('answer', 'one', 'missing', 'no', ok=False)
 
+    def test_answer_refuses_done_only_closeout(self):
+        """Farewell-shaped answers must not wake the agent; use bin/finish."""
+        self.spawn()
+        self.event('needs-decision', 'pr-review Ready for review')
+        self.agent('idle')
+        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        result = self.cli(
+            'answer', 'one', 'pr-review',
+            'Merged. Emit done and refresh usage.',
+            ok=False,
+        )
+        self.assertIn('done-only closeout', result.stderr)
+        self.assertIn('bin/finish', result.stderr)
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before)
+        self.assertFalse((self.worktree() / '.crew/answers/pr-review.md').exists())
+        # Explicit continue reason is allowed (worker must keep going).
+        self.cli(
+            'answer', 'one', 'pr-review',
+            'CI failed after merge attempt; fix the INV assertion and update the PR.',
+        )
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before + 1)
+
+    def test_answer_force_allows_done_only_looking_note(self):
+        self.spawn()
+        self.event('needs-decision', 'pr-review Ready for review')
+        self.agent('idle')
+        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        result = self.cli(
+            'answer', '--force', 'one', 'pr-review',
+            'Merged. Emit done and refresh usage.',
+        )
+        self.assertIn('warning', result.stderr.lower())
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before + 1)
+        self.assertTrue((self.worktree() / '.crew/answers/pr-review.md').exists())
+
     def test_status_unread_ack_and_missing_agent(self):
         self.spawn()
         self.report()
@@ -345,6 +386,26 @@ class CrewTest(unittest.TestCase):
         self.assertEqual(marker.read_text(), 'keep packet evidence')
         self.spawn(ok=False)  # archived ids cannot be reused
 
+    def test_finish_closes_without_agent_prompt(self):
+        """Merge/done-only closeout must not herdr agent prompt (token burn)."""
+        self.cli('spawn', '--id', 'one', '--project', str(self.project), '--kind', 'scout',
+                 '--agent', 'claude', '--brief', str(self.brief))
+        self.event('needs-decision', 'design-review Pick a direction')
+        self.agent('idle')
+        (self.worktree() / '.crew/report.md').write_text('Findings.\n')
+        self.usage()
+        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        self.cli('finish', 'one', '--decision', 'design-review',
+                 'Owner approved; primary finish; no agent turn.')
+        after = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        self.assertEqual(after, before)
+        self.assertTrue((self.crew / 'data/one/usage.json').exists())
+        self.assertTrue((self.crew / 'data/one/answers/design-review.md').exists())
+        self.assertFalse((self.crew / 'state/one.meta').exists())
+        archive_status = (self.crew / 'data/one/status').read_text()
+        self.assertIn('resolved: design-review primary-finish', archive_status)
+        self.assertIn('done: Owner approved; primary finish', archive_status)
+
     def test_teardown_requires_usage_even_with_discard(self):
         self.spawn()
         self.agent('done')
@@ -355,6 +416,79 @@ class CrewTest(unittest.TestCase):
         self.usage(pr_url='https://example.com/pull/1', pr_number=1, cost_usd=0.5)
         self.cli('teardown', 'one', '--discard')
         self.assertTrue((self.crew / 'data/one/usage.json').exists())
+
+    def test_crew_usage_claude_auto_prices_transcript(self):
+        """--auto dedups Claude JSONL usage and prices costUsd from list rates."""
+        self.spawn()
+        wt = self.worktree()
+        transcript = wt / 'session.jsonl'
+        # Duplicate msg_1 exercises unique_by(.id); haiku id exercises dated alias match.
+        transcript.write_text(
+            json.dumps({
+                'message': {
+                    'model': 'claude-sonnet-5',
+                    'id': 'msg_1',
+                    'usage': {
+                        'input_tokens': 2,
+                        'output_tokens': 4,
+                        'cache_read_input_tokens': 18531,
+                        'cache_creation_input_tokens': 14204,
+                        'cache_creation': {
+                            'ephemeral_1h_input_tokens': 14204,
+                            'ephemeral_5m_input_tokens': 0,
+                        },
+                    },
+                }
+            }) + '\n'
+            + json.dumps({
+                'message': {
+                    'model': 'claude-sonnet-5',
+                    'id': 'msg_1',
+                    'usage': {
+                        'input_tokens': 2,
+                        'output_tokens': 4,
+                        'cache_read_input_tokens': 18531,
+                        'cache_creation_input_tokens': 14204,
+                        'cache_creation': {
+                            'ephemeral_1h_input_tokens': 14204,
+                            'ephemeral_5m_input_tokens': 0,
+                        },
+                    },
+                }
+            }) + '\n'
+            + json.dumps({
+                'message': {
+                    'model': 'claude-haiku-4-5-20251001',
+                    'id': 'msg_2',
+                    'usage': {
+                        'input_tokens': 898,
+                        'output_tokens': 14,
+                        'cache_read_input_tokens': 0,
+                        'cache_creation_input_tokens': 0,
+                        'cache_creation': {
+                            'ephemeral_1h_input_tokens': 0,
+                            'ephemeral_5m_input_tokens': 0,
+                        },
+                    },
+                }
+            }) + '\n'
+        )
+        result = self.run_cmd([
+            str(wt / '.crew/crew-usage'),
+            '--transcript', str(transcript),
+            '--source', 'harness',
+        ])
+        self.assertIn('Wrote', result.stdout)
+        usage = json.loads((wt / '.crew/usage.json').read_text())
+        self.assertEqual(usage['tokens']['input'], 900)
+        self.assertEqual(usage['tokens']['output'], 18)
+        self.assertEqual(usage['tokens']['cachedRead'], 18531)
+        self.assertEqual(usage['tokens']['cacheCreation'], 14204)
+        self.assertEqual(usage['tokens']['reasoning'], 0)
+        # Scout-validated: sonnet probe 0.0605662 + haiku 0.000968.
+        self.assertAlmostEqual(usage['costUsd'], 0.0615342, places=7)
+        self.assertEqual(usage['source'], 'harness')
+        self.assertEqual(usage['harness'], 'claude')
 
     def test_ship_landing_and_local_tip_guard(self):
         self.spawn(kind='ship')

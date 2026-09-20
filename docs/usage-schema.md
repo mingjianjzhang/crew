@@ -79,3 +79,22 @@ valid - the gate is "emitted a usage record", not "perfect billing data".
 Omit unknown optional flags; the helper fills zeros / nulls and reads task id,
 kind, harness, model, and effort from `.crew` metadata when present (or from
 environment / brief assignment line).
+
+### Claude `--auto`
+
+For Claude workers, prefer letting the helper discover and price the session
+itself (no per-agent jq or arithmetic):
+
+```sh
+.crew/crew-usage --auto
+# or, with no token flags when harness is claude / CLAUDE_CODE_SESSION_ID is set:
+.crew/crew-usage --pr-url https://github.com/org/repo/pull/55 --pr-number 55
+```
+
+`--auto` resolves the session JSONL at
+`~/.claude/projects/<slug-of-$PWD>/$CLAUDE_CODE_SESSION_ID.jsonl` (slug:
+replace `/`, `.`, and spaces with `-`), dedups `message.usage` by
+`message.id`, sums input/output/cache tokens, and sets `costUsd` from
+Anthropic list rates (platform.claude.com), including per-message model rates
+for auxiliary calls. Pass `--transcript PATH` to override discovery. If a
+model has no rate row, tokens are still written and `costUsd` stays `null`.

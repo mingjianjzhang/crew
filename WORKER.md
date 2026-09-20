@@ -6,10 +6,21 @@ The human communicates through the primary, not this pane.
 ## Read first
 
 Read `.crew/brief.md` and the project's `AGENTS.md`.
-Follow the brief's scope, non-goals, checks, and delivery requirements.
+Follow the brief's scope, non-goals, anti-goals, checks, and delivery
+requirements.
 
-For Community, also read `docs/ARCHITECTURE.md` and the contracts
-named in the brief. Follow `docs/WORKFLOW.md`.
+Open only paths the brief names (plus `docs/WORKFLOW.md` when it
+lists checks). Do not preload sibling docs, whole packet trees, or
+repo-wide search before the first failing test or concrete edit.
+Prefer path-limited `rg`; open hit files only.
+
+**Discovery ban:** Do not whole-file `cat` `app.js`, DEMO stacks, or
+sibling modules outside the brief allowlist. An Edit-Map brief wins over
+curiosity - IMPLEMENTATION over archaeology. If the brief includes a Thin
+TDD Contract, follow that order: listed refs → add/run named failing tests
+→ implement to green → build/AXI last. Escalate contract bugs with
+`needs-decision`; do not silently rewrite acceptance. Honor any Anti-goals
+section as hard constraints, not suggestions.
 
 Crew has two task types:
 - `ship`: implement a change and deliver the resulting project work.
@@ -81,6 +92,12 @@ the port block programmatically.
 Use `.crew/crew-status <verb> <note>` to append status events.
 Use `working` for meaningful progress.
 
+When you receive any new human prompt (a decision answer via
+`bin/answer`, or a direct message in this pane), immediately record
+`working` with a short note of what you are about to do. Log that
+first, before reading deeply or starting the work, so the board shows
+you are active.
+
 On failure, record `failed` with the reason before ending your turn.
 On completion, record `done` with the deliverable before ending
 your turn.
@@ -90,8 +107,13 @@ your turn.
 `crew-usage/v1` file). Include input/output tokens, cached-read and
 cache-creation when the harness exposes them, reasoning tokens when
 known, `costUsd` when known, and the final PR `url`/`number` for ship
-tasks. Prefer `source: harness`. Teardown (including discard) refuses
-tasks without a valid usage file. Schema: Crew home `docs/usage-schema.md`.
+tasks. Prefer `source: harness`. For Claude workers, run
+`.crew/crew-usage` with no token flags (or `--auto`) - it locates this
+session's JSONL via `$CLAUDE_CODE_SESSION_ID` + `$PWD`, dedups usage,
+and prices `costUsd` from Anthropic list rates. Only pass manual
+`--input/--output/...` if `--auto` cannot find or price the transcript.
+Teardown (including discard) refuses tasks without a valid usage file.
+Schema: Crew home `docs/usage-schema.md`.
 
 Write updates to the status log rather than addressing the human.
 
@@ -102,8 +124,11 @@ If a human decision is needed:
 2. Stop changing code and end your turn.
 3. Do not wait, poll, or arrange a wake-up.
 
-When prompted that the decision is answered, read
-`.crew/answers/<key>.md` and continue the brief.
+When prompted that the decision is answered, immediately record
+`working`, then read `.crew/answers/<key>.md` and continue the brief.
+If the primary closes the task with `bin/finish` instead, you will not
+receive a prompt - that path is intentional for merge/done-only closeout
+so high-cost models do not spend a turn only to emit done.
 
 ## Verification
 
@@ -117,14 +142,14 @@ functionality.
 
 When the brief requires a browser check, or the outcome depends
 substantially on visual quality, layout, animation, or look and feel,
-verify in the browser with `chrome-devtools-axi` (open, snapshot,
-click, screenshot, eval as needed). Use the task's `PORT` for the
-dev server URL. Do not substitute a different browser automation tool.
+verify with `chrome-devtools-axi` on the task `PORT` once near the end
+of the work (not during exploration). Do not substitute another tool.
 
-Open the relevant screen, exercise only enough of the flow to expose
-the change, inspect the rendered result, and fix obvious visual issues.
-For canvas or WebGL, DOM or accessibility checks alone are insufficient.
-Keep the visual check brief and within the project's target platforms.
+Budget: open fixture URL → at most one `snapshot` (**never** `--full`)
+or a targeted `eval` → a few clicks/keys → at most two screenshots
+saved under `.crew/` (do not re-dump image bytes into the transcript).
+Skip `console`, `network`, lighthouse, and perf unless a check failed.
+For canvas/WebGL, DOM-only checks are insufficient; keep the path short.
 
 Report what you actually verified and any limitations.
 If `chrome-devtools-axi` is unavailable or important visual judgment

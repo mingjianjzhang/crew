@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Primary-only closeout: mark done from existing usage and tear down.
+# Never prompts the worker agent (avoids high-cost merge/done-only turns).
+source "$(dirname "$0")/../lib/common.sh"
+usage() {
+  echo 'Usage: bin/finish ID [--decision KEY] [--discard] NOTE'
+  echo '  Closes a parked task without waking the agent: optional decision'
+  echo '  resolve, append done, then bin/teardown. Requires valid .crew/usage.json.'
+  echo '  For merged ships, tip-sync the worktree to the merged head first.'
+}
+[[ ${1:-} != --help ]] || { usage; exit 0; }
+require_runtime
+decision=; discard=; id=; note=
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --decision)
+      [[ $# -ge 2 ]] || die '--decision requires KEY'
+      decision=$2; shift 2;;
+    --discard) discard=--discard; shift;;
+    --*) die "Unknown option: $1";;
+    *)
+      if [[ -z $id ]]; then id=$1; shift
+      elif [[ -z $note ]]; then
+        note=$1; shift
+        # allow remaining words as note if unquoted multi-arg
+        while [[ $# -gt 0 ]]; do note="$note $1"; shift; done
+      else die 'Unexpected argument'
+      fi;;
+  esac
+done
+[[ -n $id && -n $note ]] || { usage >&2; die 'ID and NOTE are required.'; }
+[[ -z $decision ]] || valid_key "$decision"
+lock "$STATE/$id.lock"; load_task "$id"
+[[ $PHASE == dispatched || $PHASE == removing ]] || die "Task phase is $PHASE; finish expects a dispatched checkout."
+verify_worktree
+require_usage_record "$WORKTREE/.crew/usage.json"
+
+live=$(agent_state)
+case $live in
+  working|blocked|unknown)
+    [[ -n $discard ]] || die "Agent is $live; refuse finish (would race a live turn). Wait for idle/done or pass --discard."
+    ;;
+esac
+
+log=$WORKTREE/.crew/status
+if [[ -n $decision ]]; then
+  awk -v key="$decision" '$2 == "needs-decision:" && $3 == key {found=1} END {exit !found}' "$log" ||
+    die "No recorded decision: $decision"
+  mkdir -p "$WORKTREE/.crew/answers"
+  [[ -d $WORKTREE/.crew/answers && ! -L $WORKTREE/.crew/answers ]] || die 'Missing or unsafe answers directory.'
+  # Write answer for the archive; do not herdr agent prompt.
+  printf '%s\n' "$note" > "$WORKTREE/.crew/answers/$decision.md"
+  append_event resolved "$decision primary-finish (no agent prompt)"
+fi
+
+# Done note must be one plain line for crew-status.
+done_note=$note
+[[ ${#done_note} -le 3000 ]] || die 'NOTE is too long for crew-status.'
+append_event done "$done_note"
+
+# Drop the lock before teardown (teardown takes the same lock).
+unlock "$STATE/$id.lock"
+LOCKS=()
+
+echo "$id: finished without agent prompt; tearing down."
+exec "$(dirname "$0")/teardown" "$id" ${discard:+$discard}

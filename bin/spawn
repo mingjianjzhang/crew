@@ -218,7 +218,7 @@ if [[ $PHASE == created ]]; then
     printf 'export PORT=%s\nexport CREW_PORT_BASE=%s\nexport CHROME_DEVTOOLS_AXI_SESSION=%s\n' \
       "$port" "$port" "$ID" > "$WORKTREE/.crew/env"
   fi
-  printf '\nCrew assignment: %s (%s). Branch: %s.\nUse PORT=%s and CREW_PORT_BASE=%s. If absent from tool shells, source .crew/env.\nBrowser checks: CHROME_DEVTOOLS_AXI_SESSION=%s is preset; prefer chrome-devtools-axi on PORT. Teardown stops this session and frees the port block.\nUsage: before done, write .crew/usage.json via .crew/crew-usage (input/output/cached tokens, cost if known, PR url for ships). Teardown refuses tasks without valid usage metrics. See docs/usage-schema.md.\n' \
+  printf '\nCrew assignment: %s (%s). Branch: %s.\nUse PORT=%s and CREW_PORT_BASE=%s. If absent from tool shells, source .crew/env.\nBrowser checks: CHROME_DEVTOOLS_AXI_SESSION=%s is preset; prefer chrome-devtools-axi on PORT. Teardown stops this session and frees the port block.\nUsage: before done, write .crew/usage.json via .crew/crew-usage (Claude: no token flags / --auto prices the session JSONL; else pass input/output/cached tokens and cost). Include PR url for ships. Teardown refuses tasks without valid usage metrics. See docs/usage-schema.md.\n' \
     "$ID" "$KIND" "$BRANCH" "$port" "$port" "$ID" >> "$WORKTREE/.crew/brief.md"
   phase prepared
 fi
