@@ -37,6 +37,19 @@ Use the shared board for short handoff notes, not packet copies. Name them:
 Prefer plain Markdown. Name files with task id or topic, e.g.
 `updates/ipf-pr1-landed.md`, `reviews/pr46-adversarial.md`.
 
+## Wrap-up (share retire)
+
+Teardown of a single task does **not** clear this board. When the stack is
+finished, the primary runs `bin/share-retire <share-id>`:
+
+- `--init` writes thin `CURRENT.md` + suggested `RETIRE.manifest`
+- edit the manifest (keep packets / owner freezes)
+- retire moves listed paths to `data/share-retired/<share-id>/<utc>/`
+- `state/playtest/<share-id>/` is never touched
+
+Keep `CURRENT.md` as the primary's default read so finished waves do not
+pollute the next session's context.
+
 ## Suggested update shape
 
 ```md

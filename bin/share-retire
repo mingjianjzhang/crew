@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# Human-triggered share-board wrap-up. Task teardown does NOT retire shares;
+# this moves disposable board paths into data/share-retired/ and leaves a thin
+# CURRENT.md for the primary. Never touches state/playtest/<id>.
+source "$(dirname "$0")/../lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/share-retire SHARE_ID --init
+  bin/share-retire SHARE_ID [--dry-run]
+
+Retire disposable paths listed in state/share/SHARE_ID/RETIRE.manifest.
+Moves them to data/share-retired/SHARE_ID/<utc>/ (copy then remove).
+Does not delete state/playtest/SHARE_ID. Refuses while any live task
+meta still references the share.
+
+  --init     Write CURRENT.md stub + suggested RETIRE.manifest (no moves).
+  --dry-run  Print planned moves; change nothing.
+EOF
+}
+
+[[ ${1:-} != --help ]] || { usage; exit 0; }
+require_runtime
+
+share=; init=false; dry=false
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --init) init=true; shift;;
+    --dry-run) dry=true; shift;;
+    --*) die "Unknown option: $1";;
+    *)
+      [[ -z $share ]] || die 'Unexpected argument'
+      share=$1; shift;;
+  esac
+done
+[[ -n $share ]] || { usage >&2; die 'SHARE_ID is required.'; }
+[[ $share =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'Invalid share id.'
+[[ $init == false || $dry == false ]] || die 'Use either --init or --dry-run, not both.'
+
+share_root=$STATE/share/$share
+playtest_root=$STATE/playtest/$share
+manifest=$share_root/RETIRE.manifest
+current=$share_root/CURRENT.md
+lock "$STATE/.share-retire-$share.lock"
+
+[[ -d $share_root && ! -L $share_root ]] || die "No share board: $share_root"
+
+# Refuse while a live task still holds this share.
+shopt -s nullglob
+for meta in "$STATE"/*.meta; do
+  if jq -e --arg s "$share" '(.share // "") == $s' "$meta" >/dev/null; then
+    id=$(jq -r .id "$meta")
+    die "Share $share is still referenced by live task $id ($(basename "$meta")). Tear that task down first."
+  fi
+done
+
+write_current_stub() {
+  [[ -f $current ]] && return 0
+  cat > "$current" <<EOF
+# Share board · $share
+
+Primary default read for this stack. Keep this file thin.
+
+## Active
+
+- (owner: what is still in flight)
+
+## Durable pointers
+
+- README.md
+- RETIRE.manifest (paths to archive on wrap-up)
+
+## Retired
+
+- None yet. After \`bin/share-retire $share\`, archives land under
+  \`data/share-retired/$share/<utc>/\`.
+EOF
+}
+
+suggest_manifest() {
+  # Suggested disposables only. Packet / owner freezes stay off the list.
+  # Portable across Bash 3.2 + BSD find (no GNU -printf).
+  {
+    echo '# Disposable paths relative to this share board (one per line).'
+    echo '# Edit before bin/share-retire. Lines starting with # are ignored.'
+    echo '# Packet trees and owner freezes stay off this list on purpose.'
+    echo
+    [[ -d $share_root/updates ]] && echo 'updates/'
+    find "$share_root" \( -type d -name study -o -type d -name frames -o -type d -name evidence -o -type d -name shots \) 2>/dev/null \
+      | sort | while IFS= read -r dir; do
+          rel=${dir#"$share_root"/}
+          [[ -n $rel && $rel != "$dir" ]] || continue
+          echo "$rel/"
+        done
+    find "$share_root" \( -name server.log -o -name server.pid -o -name browser-open.log -o -name checks.log -o -name export.log \) 2>/dev/null \
+      | sort | while IFS= read -r file; do
+          rel=${file#"$share_root"/}
+          [[ -n $rel && $rel != "$file" ]] || continue
+          echo "$rel"
+        done
+  } > "$manifest.tmp"
+  mv "$manifest.tmp" "$manifest"
+}
+
+if [[ $init == true ]]; then
+  write_current_stub
+  if [[ -f $manifest ]]; then
+    die "RETIRE.manifest already exists at $manifest (edit it, or remove it before --init)."
+  fi
+  suggest_manifest
+  echo "$share: wrote $current and suggested $manifest"
+  echo "Edit the manifest, then run: bin/share-retire $share"
+  exit 0
+fi
+
+[[ -f $manifest && ! -L $manifest ]] || die "Missing $manifest. Run: bin/share-retire $share --init"
+
+# Protected names: refuse even if listed (owner must rename first).
+protected='CURRENT.md
+README.md
+RETIRE.manifest
+RETIRED.md
+INDEX.md'
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+archive_root=$CREW_ROOT/data/share-retired/$share/$stamp
+planned=()
+missing=0
+
+while IFS= read -r raw || [[ -n $raw ]]; do
+  # trim
+  line=$raw
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
+  [[ -z $line || $line == \#* ]] && continue
+  [[ $line == /* ]] && die "Manifest paths must be relative (got $line)."
+  [[ $line == *..* ]] && die "Manifest path must not contain .. (got $line)."
+  # strip trailing slash for existence checks; keep as directory move
+  rel=${line%/}
+  base=$(basename "$rel")
+  if printf '%s\n' "$protected" | grep -qx "$base" && [[ $rel == "$base" ]]; then
+    die "Refusing to retire protected board file: $rel"
+  fi
+  src=$share_root/$rel
+  if [[ ! -e $src ]]; then
+    echo "skip missing: $rel" >&2
+    missing=$((missing + 1))
+    continue
+  fi
+  # Resolve and ensure still under share_root (no symlink escape).
+  src_real=$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")
+  share_real=$(cd "$share_root" && pwd -P)
+  case $src_real in
+    "$share_real"|"$share_real"/*) ;;
+    *) die "Path escapes share board: $rel";;
+  esac
+  planned+=("$rel")
+done < "$manifest"
+
+[[ ${#planned[@]} -gt 0 ]] || die "Nothing to retire (manifest empty or all paths missing). Edit $manifest."
+
+# Drop children when a parent path is also listed (move parent once).
+final=()
+for rel in "${planned[@]}"; do
+  skip=false
+  for other in "${planned[@]}"; do
+    [[ $rel == "$other" ]] && continue
+    case $rel in
+      "$other"|"$other"/*) skip=true; break;;
+    esac
+  done
+  [[ $skip == true ]] || final+=("$rel")
+done
+planned=("${final[@]}")
+[[ ${#planned[@]} -gt 0 ]] || die "Nothing to retire after parent/child prune. Edit $manifest."
+
+echo "Share: $share"
+echo "Archive: $archive_root"
+for rel in "${planned[@]}"; do
+  echo "  move $rel"
+done
+[[ -d $playtest_root ]] && echo "Playtest root retained: $playtest_root"
+
+if [[ $dry == true ]]; then
+  echo "$share: dry-run only; no changes."
+  exit 0
+fi
+
+mkdir -p "$archive_root"
+retired_log=$share_root/RETIRED.md
+{
+  echo "## $stamp"
+  echo
+  echo "Archived to \`data/share-retired/$share/$stamp/\`:"
+  echo
+} >> "$retired_log"
+
+for rel in "${planned[@]}"; do
+  src=$share_root/$rel
+  dest=$archive_root/$rel
+  mkdir -p "$(dirname "$dest")"
+  # Move directory or file.
+  mv "$src" "$dest"
+  echo "- $rel" >> "$retired_log"
+done
+
+echo >> "$retired_log"
+
+write_current_stub
+# Refresh CURRENT retired pointer (append once).
+if ! grep -q "data/share-retired/$share/$stamp" "$current" 2>/dev/null; then
+  printf '\n## Last retire\n\n- `%s` → `data/share-retired/%s/%s/`\n' \
+    "$stamp" "$share" "$stamp" >> "$current"
+fi
+
+# Copy manifest into archive for forensics.
+cp "$manifest" "$archive_root/RETIRE.manifest"
+
+echo "$share: retired ${#planned[@]} path(s) to $archive_root"
+[[ $missing -eq 0 ]] || echo "$share: skipped $missing missing manifest path(s)" >&2

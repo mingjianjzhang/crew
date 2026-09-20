@@ -170,6 +170,24 @@ yourself only when the human authorizes collecting zeros. Rollups land in
 `state/usage.jsonl` and `state/usage/<id>.json` (gitignored with `state/`).
 See `docs/usage-schema.md`.
 
+## Retiring a share board
+
+Task teardown archives the worker under `data/<id>/` and removes the
+worktree. It does **not** retire `state/share/<share-id>/` or
+`state/playtest/<share-id>/` (playtest is the packet source of truth).
+
+When a stack or project wave is done, wrap the share explicitly:
+
+1. Tear down every live task that still references that share.
+2. `bin/share-retire SHARE_ID --init` writes `CURRENT.md` plus a suggested
+   `RETIRE.manifest` (study/frames/evidence/shots, `updates/`, log junk).
+3. Edit the manifest so packet trees and owner freezes stay on the board.
+4. `bin/share-retire SHARE_ID` moves listed paths to
+   `data/share-retired/SHARE_ID/<utc>/` and appends `RETIRED.md`.
+
+Primary session default for a finished stack: read `CURRENT.md` (and
+`bin/status --ack`), not the whole share archaeology.
+
 ## Boundaries
 
 Follow the project's own instructions and the brief's delivery rules.

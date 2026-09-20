@@ -121,10 +121,54 @@ class CrewTest(unittest.TestCase):
             ('answer', ['one', 'key', 'text']),
             ('finish', ['one', 'done note']),
             ('teardown', ['one']),
+            ('share-retire', ['demo-board']),
         ]:
             result = self.cli(name, *args, ok=False, env=env)
             self.assertIn('herdr-managed pane', result.stderr)
         self.assertFalse((self.runtime / 'calls.jsonl').exists())
+
+    def test_share_retire_archives_manifest_paths(self):
+        share = self.crew / 'state/share/demo-board'
+        playtest = self.crew / 'state/playtest/demo-board'
+        (share / 'updates').mkdir(parents=True)
+        (share / 'pack' / 'study' / 'frames').mkdir(parents=True)
+        (share / 'README.md').write_text('# board\n')
+        (share / 'updates' / 'old.md').write_text('landed\n')
+        (share / 'pack' / 'study' / 'frames' / 'a.png').write_text('png\n')
+        (share / 'pack' / 'owner-freeze.md').write_text('keep\n')
+        playtest.mkdir(parents=True)
+        (playtest / 'keep.txt').write_text('playtest\n')
+
+        init = self.cli('share-retire', 'demo-board', '--init')
+        self.assertIn('RETIRE.manifest', init.stdout)
+        manifest = share / 'RETIRE.manifest'
+        self.assertTrue(manifest.is_file())
+        self.assertTrue((share / 'CURRENT.md').is_file())
+        # Keep only heavy disposables; leave owner freeze on the board.
+        manifest.write_text('updates/\npack/study/\n')
+
+        dry = self.cli('share-retire', 'demo-board', '--dry-run')
+        self.assertIn('move updates', dry.stdout)
+        self.assertTrue((share / 'updates' / 'old.md').is_file())
+
+        self.cli('share-retire', 'demo-board')
+        self.assertFalse((share / 'updates').exists())
+        self.assertFalse((share / 'pack' / 'study').exists())
+        self.assertTrue((share / 'pack' / 'owner-freeze.md').is_file())
+        self.assertTrue((share / 'README.md').is_file())
+        self.assertEqual((playtest / 'keep.txt').read_text(), 'playtest\n')
+        archives = list((self.crew / 'data/share-retired/demo-board').iterdir())
+        self.assertEqual(len(archives), 1)
+        arch = archives[0]
+        self.assertTrue((arch / 'updates' / 'old.md').is_file())
+        self.assertTrue((arch / 'pack' / 'study' / 'frames' / 'a.png').is_file())
+        self.assertTrue((share / 'RETIRED.md').is_file())
+
+        # Live task on the same share must block a later retire.
+        self.cli('spawn', '--id', 'held', '--project', str(self.project), '--kind', 'scout',
+                 '--agent', 'claude', '--brief', str(self.brief), '--share', 'demo-board')
+        blocked = self.cli('share-retire', 'demo-board', ok=False)
+        self.assertIn('still referenced by live task held', blocked.stderr)
 
     def test_spawn_is_fresh_isolated_and_returns_without_wait(self):
         (self.project / 'hello.txt').write_text('dirty human work\n')

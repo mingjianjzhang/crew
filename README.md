@@ -123,7 +123,8 @@ workers on the same stack read and write short Markdown notes there (landed
 PRs, review reports, contract gotchas). Omitted `--share` with a non-default
 `--base` derives the id from the base branch name; use `--share none` to skip.
 When basing on a PR head, pass the integration stack id explicitly
-(`--share crew-ipf`). Teardown does not delete the share directory.
+(`--share crew-ipf`). Teardown does not delete the share directory; use
+`bin/share-retire` when the stack itself is finished.
 
 A shared task also gets the durable Crew-home playtest root
 `state/playtest/<ID>/`, exposed to the worker as the absolute `PLAYTEST_DIR`.
@@ -202,6 +203,7 @@ discarded project changes.
 | `bin/answer` | Save a human answer and wake the worker to continue |
 | `bin/finish` | Zero-token merge/done-only closeout (no agent prompt) |
 | `bin/teardown` | Landing checks, archive, and removal |
+| `bin/share-retire` | Wrap a finished share board; archive disposable paths |
 | `docs/crew-instruments.md` | Post-wave brief/closeout instruments |
 | `lib/common.sh` | Shared locking, JSON metadata, Git identity checks, log reduction |
 | `lib/crew-status` | Tiny append helper copied into each worktree |
