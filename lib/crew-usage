@@ -11,18 +11,20 @@ usage_help() {
 Usage: .crew/crew-usage [--auto | --input N --output N] [options]
 
 Token modes:
-  --auto                 Discover Claude session JSONL, sum tokens, price costUsd
+  --auto                 Discover harness usage and price costUsd
   --input N --output N   Manual token counts (required unless --auto)
 
-When --input/--output are omitted and the harness is Claude (or
-$CLAUDE_CODE_SESSION_ID is set), --auto is implied.
+When --input/--output are omitted, --auto is implied for Claude
+($CLAUDE_CODE_SESSION_ID or harness claude) and for Grok
+($GROK_SESSION_ID or harness grok).
 
 Optional:
   --transcript PATH      Claude session JSONL (skips discovery; implies --auto)
+  --grok-usage PATH      Grok `usage` JSON (skips `grok usage`; implies --auto)
   --cached-read N        Cached read / cache hit tokens (default 0)
   --cache-creation N     Cache write / creation tokens (default 0)
   --reasoning N          Reasoning tokens (default 0)
-  --cost-usd X           Dollar cost (omit for null; --auto fills when priced)
+  --cost-usd X           Dollar cost (omit for null; the key is still written; --auto fills when priced)
   --source harness|estimated|unavailable   (default harness)
   --pr-url URL           Final PR https URL
   --pr-number N          PR number
@@ -41,12 +43,14 @@ EOF
 input=; output=; cached_read=0; cache_creation=0; reasoning=0
 cost_usd=; cost_set=false; source=harness
 pr_url=; pr_number=; model=; effort=; harness=; kind=; task_id=; notes=
-auto=false; transcript=
+model_set=false
+auto=false; auto_kind=; transcript=; grok_usage_file=
 
 while [[ $# -gt 0 ]]; do
   case $1 in
     --auto) auto=true; shift;;
-    --transcript) transcript=$2; auto=true; shift 2;;
+    --transcript) transcript=$2; auto=true; auto_kind=claude; shift 2;;
+    --grok-usage) grok_usage_file=$2; auto=true; auto_kind=grok; shift 2;;
     --input) input=$2; shift 2;;
     --output) output=$2; shift 2;;
     --cached-read) cached_read=$2; shift 2;;
@@ -56,7 +60,7 @@ while [[ $# -gt 0 ]]; do
     --source) source=$2; shift 2;;
     --pr-url) pr_url=$2; shift 2;;
     --pr-number) pr_number=$2; shift 2;;
-    --model) model=$2; shift 2;;
+    --model) model=$2; model_set=true; shift 2;;
     --effort) effort=$2; shift 2;;
     --harness) harness=$2; shift 2;;
     --kind) kind=$2; shift 2;;
@@ -251,10 +255,91 @@ run_claude_auto() {
   echo "Auto usage from $path" >&2
 }
 
-# Imply --auto when token flags omitted for Claude workers.
+# Grok persists session.costUsdTicks (10^10 ticks per USD) via `grok usage`.
+# Do not read updates.jsonl totalTokens; that counter is context size, not billable input.
+run_grok_auto() {
+  local raw summary auto_notes computed grok_model
+  if [[ -n $grok_usage_file ]]; then
+    [[ -f $grok_usage_file ]] || { echo "Grok usage file not found: $grok_usage_file" >&2; return 1; }
+    raw=$(cat "$grok_usage_file")
+  else
+    [[ -n ${GROK_SESSION_ID:-} ]] || {
+      echo 'GROK_SESSION_ID is not set. Pass --grok-usage PATH or --input/--output.' >&2
+      return 1
+    }
+    command -v grok >/dev/null || { echo 'grok CLI is not installed.' >&2; return 1; }
+    raw=$(grok usage "$GROK_SESSION_ID") || {
+      echo "grok usage failed for session $GROK_SESSION_ID" >&2
+      return 1
+    }
+  fi
+  summary=$(jq -c '
+    def money8:
+      ((. / 10000000000) * 100000000 | round) as $u
+      | ($u / 100000000 | floor) as $w
+      | ($u - ($w * 100000000) | tostring) as $frac
+      | ($w | tostring) + "." + ("00000000"[0:(8 - ($frac | length))] + $frac);
+    if (.session | type) != "object" then empty
+    else .session | {
+      input: (.inputTokens // 0),
+      output: (.outputTokens // 0),
+      cachedRead: (.cachedReadTokens // 0),
+      cacheCreation: (.cacheCreationTokens // 0),
+      reasoning: (.reasoningTokens // 0),
+      cost: (if (.costUsdTicks | type) == "number" then (.costUsdTicks | money8) else null end),
+      model: (.primaryModelId // "")
+    } end
+  ' <<<"$raw") || { echo 'Failed to parse grok usage JSON.' >&2; return 1; }
+  [[ -n $summary ]] || { echo 'grok usage JSON has no session object.' >&2; return 1; }
+
+  input=$(jq -r '.input' <<<"$summary")
+  output=$(jq -r '.output' <<<"$summary")
+  cached_read=$(jq -r '.cachedRead' <<<"$summary")
+  cache_creation=$(jq -r '.cacheCreation' <<<"$summary")
+  reasoning=$(jq -r '.reasoning' <<<"$summary")
+  if ! $cost_set; then
+    computed=$(jq -r '.cost // empty' <<<"$summary")
+    if [[ -n $computed && $computed != null ]]; then
+      cost_usd=$computed
+      cost_set=true
+    fi
+  fi
+  if ! $model_set; then
+    grok_model=$(jq -r '.model // empty' <<<"$summary")
+    if [[ -n $grok_model && $grok_model != null ]]; then
+      model=$grok_model
+    fi
+  fi
+  if [[ -n $grok_usage_file ]]; then
+    auto_notes="grok usage file: $(basename "$grok_usage_file"); costUsdTicks/1e10"
+  else
+    auto_notes="grok usage $GROK_SESSION_ID; costUsdTicks/1e10"
+  fi
+  if [[ -z $notes ]]; then
+    notes=$auto_notes
+  fi
+  echo "Auto usage from grok ${GROK_SESSION_ID:-$grok_usage_file}" >&2
+}
+
+# Imply --auto when token flags are omitted.
+if [[ -n $transcript && -n $grok_usage_file ]]; then
+  echo 'Pass only one of --transcript or --grok-usage.' >&2
+  exit 2
+fi
 if ! $auto && [[ -z $input && -z $output ]]; then
-  if [[ $harness == claude || -n ${CLAUDE_CODE_SESSION_ID:-} || -n $transcript ]]; then
+  if [[ $harness == claude || -n ${CLAUDE_CODE_SESSION_ID:-} ]]; then
     auto=true
+    auto_kind=claude
+  elif [[ $harness == grok || -n ${GROK_SESSION_ID:-} ]]; then
+    auto=true
+    auto_kind=grok
+  fi
+fi
+if $auto && [[ -z $auto_kind ]]; then
+  if [[ -n $grok_usage_file || $harness == grok ]]; then
+    auto_kind=grok
+  else
+    auto_kind=claude
   fi
 fi
 
@@ -263,10 +348,14 @@ if $auto; then
     echo '--auto cannot be combined with --input/--output.' >&2
     exit 2
   fi
-  run_claude_auto || exit 1
+  if [[ $auto_kind == grok ]]; then
+    run_grok_auto || exit 1
+  else
+    run_claude_auto || exit 1
+  fi
 fi
 
-[[ -n $input && -n $output ]] || { echo 'Required: --input and --output (or --auto for Claude).' >&2; exit 2; }
+[[ -n $input && -n $output ]] || { echo 'Required: --input and --output (or --auto for Claude or Grok).' >&2; exit 2; }
 [[ $input =~ ^[0-9]+([.][0-9]+)?$ && $output =~ ^[0-9]+([.][0-9]+)?$ ]] ||
   { echo 'Token counts must be non-negative numbers.' >&2; exit 2; }
 for n in "$cached_read" "$cache_creation" "$reasoning"; do
@@ -286,6 +375,14 @@ if [[ -n $pr_number ]]; then
 fi
 if [[ -n $notes ]]; then
   [[ $notes != *$'\n'* && ${#notes} -le 500 ]] || { echo 'notes must be one short line.' >&2; exit 2; }
+fi
+# Unknown cost stays on the record as null. Omitting the key made rollups treat
+# the session as $0. Estimated input must be billable tokens, not totalTokens.
+if ! $cost_set; then
+  echo 'crew-usage: costUsd is null. Unknown dollars, not $0. Pass --cost-usd when the harness priced the session.' >&2
+  if [[ $source == estimated ]]; then
+    echo 'crew-usage: source=estimated with no costUsd. tokens.input must be billable input, not a context-size counter (totalTokens).' >&2
+  fi
 fi
 
 recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -332,6 +429,6 @@ jq -cn \
     tokens:{input:$input,output:$output,cachedRead:$cachedRead,
             cacheCreation:$cacheCreation,reasoning:$reasoning},
     costUsd:$costUsd,notes:$notes
-  } | with_entries(select(.value != null))' > "$tmp"
+  } | with_entries(select(.value != null or .key == "costUsd"))' > "$tmp"
 mv "$tmp" "$usage_path"
 echo "Wrote $usage_path"

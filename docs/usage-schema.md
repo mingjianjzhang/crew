@@ -53,7 +53,7 @@ JSON line to `state/usage.jsonl` for session rollups.
 | `tokens.cachedRead` | preferred | Cache hits / cached read tokens; use `0` if unknown |
 | `tokens.cacheCreation` | preferred | Cache write / creation tokens; use `0` if unknown |
 | `tokens.reasoning` | preferred | Hidden/reasoning tokens when reported; else `0` |
-| `costUsd` | preferred | Number or `null` if the harness does not expose $ |
+| `costUsd` | preferred | Number, or `null` when the harness does not expose $. The helper always writes the key. Older rows may omit it; omission means the same as `null` (unknown, not zero). |
 | `notes` | no | Single line, no newlines |
 
 ### `source` values
@@ -61,7 +61,7 @@ JSON line to `state/usage.jsonl` for session rollups.
 | Value | When |
 | --- | --- |
 | `harness` | Copied from the agent CLI / session usage API |
-| `estimated` | Derived from partial counters or screenshots |
+| `estimated` | Derived from partial counters or screenshots. `tokens.input` must be billable input, not a context-size counter such as Grok `totalTokens`. |
 | `unavailable` | Harness exposed nothing usable; token fields may be `0` with an explanation in `notes` |
 
 Workers should prefer `harness`. Use `unavailable` only after a genuine attempt to
@@ -79,6 +79,12 @@ valid - the gate is "emitted a usage record", not "perfect billing data".
 Omit unknown optional flags; the helper fills zeros / nulls and reads task id,
 kind, harness, model, and effort from `.crew` metadata when present (or from
 environment / brief assignment line).
+
+`costUsd` is written even when unknown (`null`). Do not sum `costUsd // 0`:
+that turns unpriced work into free work. `bin/usage` sums only numeric
+`costUsd` and lists null or omitted rows as blind. `bin/status` prints that
+split for the last three UTC days. `bin/finish` warns on stderr when the
+task being closed has no numeric `costUsd`, and still closes.
 
 ### Claude `--auto`
 
@@ -98,3 +104,14 @@ replace `/`, `.`, and spaces with `-`), dedups `message.usage` by
 Anthropic list rates (platform.claude.com), including per-message model rates
 for auxiliary calls. Pass `--transcript PATH` to override discovery. If a
 model has no rate row, tokens are still written and `costUsd` stays `null`.
+
+### Grok `--auto`
+
+For Grok workers, the same no-token-flag path reads the harness bill. It runs
+`grok usage "$GROK_SESSION_ID"` and copies `session.inputTokens`,
+`outputTokens`, `cachedReadTokens`, `cacheCreationTokens`, and
+`reasoningTokens`. `costUsd` is `costUsdTicks / 1e10` (10^10 ticks per USD).
+Do not divide by `1e9`, and do not copy `updates.jsonl` `totalTokens` into
+`tokens.input` (that counter is context size). Pass `--grok-usage PATH` to
+read a saved `usage` JSON instead of invoking the CLI. The billed model id
+(`primaryModelId`, often `grok-4.7-build`) is recorded unless `--model` is set.

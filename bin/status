@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # The log is truth. herdr is read once per row and never focused.
 source "$(dirname "$0")/../lib/common.sh"
-[[ ${1:-} != --help ]] || { echo 'Usage: bin/status [--ack]'; exit 0; }
+source "$(dirname "$0")/../lib/usage-report.sh"
+[[ ${1:-} != --help ]] || {
+  echo 'Usage: bin/status [--ack]'
+  echo '  After the task table, prints known cost vs blind rows for the last 3 UTC days.'
+  exit 0
+}
 [[ $# == 0 || ( $# == 1 && $1 == --ack ) ]] || die 'Usage: bin/status [--ack]'
 require_runtime
 ack=${1:-}; cursor='{}'
@@ -40,4 +45,9 @@ for file in "$STATE"/*.meta; do
 done
 if [[ $ack == --ack ]]; then
   printf '%s\n' "$cursor" > "$STATE/seen.tmp"; mv "$STATE/seen.tmp" "$STATE/seen"
+fi
+# Last 3 UTC days (today and the two before). Missing log stays quiet; a
+# present log with nothing in the window says so. Blind rows are not $0.
+if [[ -f $STATE/usage.jsonl && ! -L $STATE/usage.jsonl ]]; then
+  usage_report "$STATE/usage.jsonl" "$(usage_trailing_start 2)" "" line
 fi

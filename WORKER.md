@@ -110,8 +110,11 @@ known, `costUsd` when known, and the final PR `url`/`number` for ship
 tasks. Prefer `source: harness`. For Claude workers, run
 `.crew/crew-usage` with no token flags (or `--auto`) - it locates this
 session's JSONL via `$CLAUDE_CODE_SESSION_ID` + `$PWD`, dedups usage,
-and prices `costUsd` from Anthropic list rates. Only pass manual
-`--input/--output/...` if `--auto` cannot find or price the transcript.
+and prices `costUsd` from Anthropic list rates. For Grok workers, the same
+no-token-flag path runs `grok usage "$GROK_SESSION_ID"` and sets `costUsd`
+to `costUsdTicks / 1e10`. Do not copy `totalTokens` into `tokens.input`.
+Only pass manual `--input/--output/...` if `--auto` cannot find or price
+the session.
 Teardown (including discard) refuses tasks without a valid usage file.
 Schema: Crew home `docs/usage-schema.md`.
 

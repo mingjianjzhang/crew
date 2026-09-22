@@ -534,6 +534,52 @@ class CrewTest(unittest.TestCase):
         self.assertEqual(usage['source'], 'harness')
         self.assertEqual(usage['harness'], 'claude')
 
+    def test_crew_usage_grok_auto_prices_session(self):
+        """Grok --auto reads `grok usage` and prices costUsdTicks / 1e10."""
+        self.spawn()
+        wt = self.worktree()
+        fixture = wt / 'grok-usage.json'
+        # totalTokens is a decoy. The helper must use inputTokens, not that counter.
+        fixture.write_text(json.dumps({
+            'sessionId': 'sess-1',
+            'session': {
+                'inputTokens': 6189090,
+                'outputTokens': 68234,
+                'cachedReadTokens': 5154944,
+                'cacheCreationTokens': 0,
+                'reasoningTokens': 40734,
+                'totalTokens': 99999999,
+                'costUsdTicks': 17187571200,
+                'primaryModelId': 'grok-4.7-build',
+            },
+        }))
+        (self.fakebin / 'grok').write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = usage ]; then\n'
+            '  [ "$2" = "$GROK_SESSION_ID" ] || exit 1\n'
+            '  cat "$GROK_USAGE_FIXTURE"\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 0\n'
+        )
+        (self.fakebin / 'grok').chmod(0o755)
+        result = self.run_cmd(
+            [str(wt / '.crew/crew-usage'), '--harness', 'grok'],
+            env=dict(self.env, GROK_SESSION_ID='sess-1', GROK_USAGE_FIXTURE=str(fixture)),
+        )
+        self.assertIn('Auto usage from grok sess-1', result.stderr)
+        usage = json.loads((wt / '.crew/usage.json').read_text())
+        self.assertEqual(usage['tokens']['input'], 6189090)
+        self.assertNotEqual(usage['tokens']['input'], 99999999)
+        self.assertEqual(usage['tokens']['output'], 68234)
+        self.assertEqual(usage['tokens']['cachedRead'], 5154944)
+        self.assertEqual(usage['tokens']['reasoning'], 40734)
+        self.assertAlmostEqual(usage['costUsd'], 1.71875712, places=8)
+        self.assertNotAlmostEqual(usage['costUsd'], 17.1875712, places=4)
+        self.assertEqual(usage['model'], 'grok-4.7-build')
+        self.assertEqual(usage['source'], 'harness')
+        self.assertEqual(usage['harness'], 'grok')
+
     def test_ship_landing_and_local_tip_guard(self):
         self.spawn(kind='ship')
         wt = self.worktree()
@@ -689,6 +735,116 @@ class CrewTest(unittest.TestCase):
         p.write_text(json.dumps(meta))
         self.cli('spawn', '--resume', 'one')
         self.assertEqual(self.start_args('one')[1], ['--permission-mode', 'auto'])
+
+    def test_crew_usage_keeps_null_cost_and_warns(self):
+        self.spawn()
+        result = self.usage()
+        self.assertIn('costUsd is null', result.stderr)
+        self.assertIn('not $0', result.stderr)
+        data = json.loads((self.worktree() / '.crew/usage.json').read_text())
+        self.assertIsNone(data['costUsd'])
+        priced = self.usage(cost_usd='1.5')
+        self.assertNotIn('costUsd is null', priced.stderr)
+        data = json.loads((self.worktree() / '.crew/usage.json').read_text())
+        self.assertEqual(data['costUsd'], 1.5)
+        estimated = self.usage(source='estimated')
+        self.assertIn('totalTokens', estimated.stderr)
+        self.assertIsNone(json.loads((self.worktree() / '.crew/usage.json').read_text())['costUsd'])
+
+    def test_usage_rollup_splits_known_and_blind(self):
+        day = self.run_cmd(['date', '-u', '+%Y-%m-%d']).stdout.strip()
+        state = self.crew / 'state'
+        state.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'priced', 'kind': 'ship',
+                'harness': 'claude', 'model': 'claude-opus-5-5',
+                'recordedAt': f'{day}T01:00:00Z', 'source': 'harness',
+                'costUsd': 1.25, 'tokens': {'input': 1, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'blind-ship', 'kind': 'ship',
+                'harness': 'grok', 'model': 'grok-4.7',
+                'recordedAt': f'{day}T02:00:00Z', 'source': 'estimated',
+                'tokens': {'input': 1300000, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'explicit-null', 'kind': 'scout',
+                'harness': 'grok', 'model': 'grok-4.7',
+                'recordedAt': f'{day}T03:00:00Z', 'source': 'unavailable',
+                'costUsd': None, 'tokens': {'input': 0, 'output': 0},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'old-priced', 'kind': 'scout',
+                'harness': 'claude', 'model': 'claude-fable-5-1',
+                'recordedAt': '2020-01-01T00:00:00Z', 'source': 'harness',
+                'costUsd': 9.5, 'tokens': {'input': 1, 'output': 1},
+            },
+        ]
+        (state / 'usage.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        window = self.cli('usage', '--since', day, '--until', day).stdout
+        self.assertIn('records: 3', window)
+        self.assertIn('known_usd: 1.25', window)
+        self.assertIn('priced: 1', window)
+        self.assertIn('blind: 2', window)
+        self.assertIn('blind-ship grok/grok-4.7 ship estimated', window)
+        self.assertIn('explicit-null grok/grok-4.7 scout unavailable', window)
+        self.assertNotIn('old-priced', window)
+        self.assertNotIn('9.50', window)
+        everything = self.cli('usage').stdout
+        self.assertIn('records: 4', everything)
+        self.assertIn('known_usd: 10.75', everything)
+        self.assertIn('old-priced', everything)
+
+    def test_status_prints_blind_cost_line(self):
+        day = self.run_cmd(['date', '-u', '+%Y-%m-%d']).stdout.strip()
+        state = self.crew / 'state'
+        state.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'priced', 'kind': 'ship',
+                'harness': 'claude', 'model': 'claude-opus-5-5',
+                'recordedAt': f'{day}T01:00:00Z', 'source': 'harness',
+                'costUsd': 1.25, 'tokens': {'input': 1, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'blind-ship', 'kind': 'ship',
+                'harness': 'grok', 'model': 'grok-4.7',
+                'recordedAt': f'{day}T02:00:00Z', 'source': 'estimated',
+                'tokens': {'input': 10, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'old-priced', 'kind': 'scout',
+                'harness': 'claude', 'model': 'claude-fable-5-1',
+                'recordedAt': '2020-01-01T00:00:00Z', 'source': 'harness',
+                'costUsd': 9.5, 'tokens': {'input': 1, 'output': 1},
+            },
+        ]
+        (state / 'usage.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        status = self.cli('status').stdout
+        self.assertIn('known $1.25 (1 priced), blind 1 (no costUsd, not $0)', status)
+        self.assertNotIn('9.50', status)
+        self.assertNotIn('old-priced', status)
+
+    def test_finish_warns_when_cost_is_blind(self):
+        self.spawn()
+        self.agent('idle')
+        self.report()
+        result = self.cli('finish', 'one', 'Close the blind scout.')
+        self.assertIn('usage blind: one has no costUsd', result.stderr)
+        self.assertIn('Not $0.', result.stderr)
+        self.assertIn('finished without agent prompt', result.stdout)
+
+    def test_finish_silent_when_cost_is_priced(self):
+        self.spawn()
+        self.agent('idle')
+        (self.worktree() / '.crew/report.md').write_text('Findings.\n')
+        self.usage(cost_usd='2')
+        self.event('done', '.crew/report.md')
+        self.agent('done')
+        result = self.cli('finish', 'one', 'Priced closeout.')
+        self.assertNotIn('usage blind', result.stderr)
+        self.assertIn('finished without agent prompt', result.stdout)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
