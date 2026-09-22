@@ -198,3 +198,8 @@ only when a human operator instructs that directly in the brief or via
 
 Keep Crew small: no supervisors, polling loops, automatic retries,
 harness extensions, or additional orchestration layers.
+The one exception is `bin/lane watch` (`docs/lane-rules-completion.md`):
+one process, started by `bin/lane assign` and stopped from `bin/lane cancel`.
+It may subscribe to herdr pane events and stall-tick `herdr agent get`
+for its own lane panes. It does not focus panes, prompt workers, answer,
+finish, or merge.

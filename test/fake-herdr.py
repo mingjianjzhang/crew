@@ -90,6 +90,8 @@ elif args[:2] == ['agent', 'prompt']:
     data.setdefault('prompts', []).append(args[3])
     write_task(args[2], data)
     emit({})
+elif args[:2] == ['notification', 'show']:
+    emit({})
 elif args[:2] == ['worktree', 'remove']:
     name = option('--workspace').removeprefix('opaque-')
     data = read_task(name)

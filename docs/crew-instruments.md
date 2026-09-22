@@ -120,3 +120,6 @@ When writing a brief (`AGENTS.md`):
 4. Visual xhigh → Taste Freeze Gate (refuse to spawn until wireframe/ref
    pointer exists)
 5. Human merge → `bin/finish`, never a goodbye `bin/answer`
+6. A rules-completion lane may spawn the next pre-declared ship or review
+   only (`docs/lane-rules-completion.md`). It still obeys every instrument
+   above. Merge, finish, and the freeze stamp stay human.

@@ -122,6 +122,7 @@ class CrewTest(unittest.TestCase):
             ('finish', ['one', 'done note']),
             ('teardown', ['one']),
             ('share-retire', ['demo-board']),
+            ('lane', ['assign']),
         ]:
             result = self.cli(name, *args, ok=False, env=env)
             self.assertIn('herdr-managed pane', result.stderr)
@@ -689,6 +690,133 @@ class CrewTest(unittest.TestCase):
         p.write_text(json.dumps(meta))
         self.cli('spawn', '--resume', 'one')
         self.assertEqual(self.start_args('one')[1], ['--permission-mode', 'auto'])
+
+    def lane_brief(self, extra=''):
+        path = self.root / 'lane-brief.md'
+        path.write_text(
+            '# Rules ship\n\n'
+            '## Edit-Map\n\n'
+            'Open `hello.txt:1` only.\n\n'
+            '## Thin TDD\n\n'
+            'must-stay-green: hello stays put.\n\n'
+            '```\n'
+            'git status --short\n'
+            '```\n'
+            + extra
+        )
+        return path
+
+    def lane_freeze(self, text='FROZEN\n'):
+        path = self.root / 'freeze.md'
+        path.write_text(text)
+        return path
+
+    def assign_lane(self, ident='rules-r3', *, ok=True, brief=None, budget='40', effort='high', share='demo-board'):
+        return self.cli(
+            'lane', 'assign', ident,
+            '--project', str(self.project),
+            '--base', 'main',
+            '--share', share,
+            '--freeze', str(self.lane_freeze()),
+            '--budget-usd', budget,
+            '--brief', str(brief or self.lane_brief()),
+            '--ship-model', 'grok-4.7',
+            '--ship-effort', effort,
+            '--review-model', 'grok-4.7',
+            '--review-effort', 'high',
+            '--no-watch',
+            ok=ok,
+        )
+
+    def test_spawn_lane_records_env_without_a_status_hook(self):
+        self.cli('spawn', '--id', 'laned', '--project', str(self.project), '--kind', 'scout',
+                 '--agent', 'claude', '--brief', str(self.brief), '--lane', 'rules-r3')
+        env = (self.worktree('laned') / '.crew' / 'env').read_text()
+        self.assertIn("export CREW_LANE=rules-r3\n", env)
+        self.assertIn('export CREW_ROOT=', env)
+        self.assertEqual(self.meta('laned')['lane'], 'rules-r3')
+        hook = (self.worktree('laned') / '.crew' / 'crew-status').read_text()
+        self.assertNotIn('lane-step', hook)
+        self.assertNotIn('CREW_LANE', hook)
+
+    def test_spawn_lane_refuses_yolo_plan_and_xhigh(self):
+        for extra in (['--yolo'], ['--permission-mode', 'plan'], ['--effort', 'xhigh'], ['--await-human']):
+            result = self.cli(
+                'spawn', '--id', 'banned', '--project', str(self.project), '--kind', 'ship',
+                '--agent', 'claude', '--brief', str(self.brief), '--lane', 'rules-r3', *extra,
+                ok=False,
+            )
+            self.assertIn('lane', result.stderr.lower())
+            self.assertFalse((self.crew / 'state' / 'banned.meta').exists())
+
+    def test_lane_assign_spawns_ship_and_review_once(self):
+        self.assign_lane()
+        lane = json.loads((self.crew / 'state' / 'lanes' / 'rules-r3.json').read_text())
+        self.assertEqual(lane['kind'], 'rules-completion')
+        self.assertEqual(lane['state'], 'shipping')
+        self.assertEqual(lane['currentTask'], 'rules-r3-s')
+        self.assertFalse(lane['yolo'] if 'yolo' in lane else False)
+        env = (self.worktree('rules-r3-s') / '.crew' / 'env').read_text()
+        self.assertIn('CREW_LANE=rules-r3', env)
+        ship = self.meta('rules-r3-s')
+        self.assertFalse(ship['yolo'])
+        self.assertNotIn('xhigh', ship['launch_args'])
+        self.assertNotIn('plan', ship['launch_args'])
+        self.usage('rules-r3-s', pr_url='https://example.test/pull/9', pr_number=9, cost_usd='3.5')
+        self.event('done', 'ship ready', 'rules-r3-s')
+        self.cli('lane', 'reconcile', 'rules-r3', '--task', 'rules-r3-s', '--agent-status', 'working')
+        lane = json.loads((self.crew / 'state' / 'lanes' / 'rules-r3.json').read_text())
+        self.assertEqual(lane['state'], 'reviewing')
+        self.assertEqual(lane['currentTask'], 'rules-r3-v1')
+        self.assertEqual(lane['reviewCount'], 1)
+        review = self.meta('rules-r3-v1')
+        self.assertEqual(review['kind'], 'scout')
+        self.assertEqual(review['lane'], 'rules-r3')
+        after = len(self.calls())
+        self.cli('lane', 'reconcile', 'rules-r3', '--task', 'rules-r3-s', '--agent-status', 'idle')
+        self.assertEqual(len(self.calls()), after)
+        prompts = [call for call in self.calls() if call[:2] == ['agent', 'prompt']]
+        self.assertEqual(len(prompts), 2)
+
+    def test_lane_assign_refuses_bad_entry(self):
+        self.assign_lane(effort='xhigh', ok=False)
+        self.assertFalse((self.crew / 'state' / 'lanes' / 'rules-r3.json').exists())
+        self.assign_lane(brief=self.lane_brief('Mode: hosted-debug-session\n'), ok=False)
+        self.assign_lane(brief=self.lane_brief().with_name('nope.md'), ok=False)
+        bare = self.root / 'bare.md'
+        bare.write_text('No map and no contract.\n')
+        self.assign_lane(brief=bare, ok=False)
+        freeze = self.lane_freeze('not frozen\n')
+        result = self.cli(
+            'lane', 'assign', 'rules-r3',
+            '--project', str(self.project), '--base', 'main', '--share', 'demo-board',
+            '--freeze', str(freeze), '--budget-usd', '40', '--brief', str(self.lane_brief()),
+            '--ship-model', 'grok-4.7', '--ship-effort', 'high',
+            '--review-model', 'grok-4.7', '--review-effort', 'high', '--no-watch',
+            ok=False,
+        )
+        self.assertIn('FROZEN', result.stderr)
+        board = self.crew / 'state' / 'share' / 'demo-board'
+        board.mkdir(parents=True)
+        (board / 'YOLO.md').write_text('# Yolo\n\n**Status:** ON\n')
+        result = self.assign_lane(ok=False)
+        self.assertIn('YOLO', result.stderr)
+        self.assertFalse((self.crew / 'state' / 'rules-r3-s.meta').exists())
+
+    def test_lane_one_live_lane_per_share_and_cancel_does_not_spawn(self):
+        self.assign_lane()
+        result = self.assign_lane(ident='rules-r4', ok=False)
+        self.assertIn('live lane', result.stderr)
+        self.cli('lane', 'cancel', 'rules-r3')
+        self.usage('rules-r3-s', pr_url='https://example.test/pull/1', pr_number=1, cost_usd='1')
+        self.event('done', 'too late', 'rules-r3-s')
+        before = len(self.calls())
+        self.cli('lane', 'reconcile', 'rules-r3', '--task', 'rules-r3-s', '--agent-status', 'idle')
+        self.assertEqual(len(self.calls()), before)
+        lane = json.loads((self.crew / 'state' / 'lanes' / 'rules-r3.json').read_text())
+        self.assertEqual(lane['state'], 'cancelled')
+        prompts = [call for call in self.calls() if call[:2] == ['agent', 'prompt']]
+        self.assertEqual(len(prompts), 1)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
