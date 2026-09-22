@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/../lib/common.sh"
+usage() {
+  echo 'Usage: bin/lane assign ID --project PATH --base REF --share ID --freeze FILE --budget-usd N --brief FILE'
+  echo '       [--max-cycles 2] [--stall-minutes 60] --ship-model M --ship-effort E --review-model M --review-effort E'
+  echo '       [--ship-agent grok] [--review-agent grok] [--no-watch]'
+  echo '       bin/lane cancel ID'
+  echo '       bin/lane watch [--once]'
+  echo '       bin/lane reconcile ID --task TASK [--agent-status STATUS] [--gone] [--tick]'
+}
+[[ ${1:-} != --help ]] || { usage; exit 0; }
+require_runtime
+exec python3 "$CREW_ROOT/lib/lane.py" "$@"

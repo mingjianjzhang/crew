@@ -3,31 +3,35 @@ source "$(dirname "$0")/../lib/common.sh"
 usage() {
   echo 'Usage: bin/spawn --id ID --project PATH --kind ship|scout --brief FILE [--profile default|planning|routine|mechanics|new-feature]'
   echo '       [--agent KIND] [--model MODEL] [--effort LEVEL|default] [--base REF] [--share ID|none]'
-  echo '       [--unattended-bypass]'
+  echo '       [--permission-mode MODE] [--yolo] [--await-human] [--lane ID] [--unattended-bypass]'
   echo '       bin/spawn --resume ID'
 }
 [[ ${1:-} != --help ]] || { usage; exit 0; }
 require_runtime
-resume=; id=; project=; kind=; harness=; brief=; bypass=false; profile=; model=; effort=; base_arg=; share_arg=; playtest_dir=
+resume=; id=; project=; kind=; harness=; brief=; bypass=false; profile=; model=; effort=; base_arg=; share_arg=; permission_mode=; yolo=false; await_human=false; lane=; playtest_dir=
 while [[ $# -gt 0 ]]; do
   case $1 in
     --unattended-bypass) bypass=true; shift;;
-    --id|--project|--kind|--agent|--brief|--resume|--profile|--model|--effort|--base|--share)
+    --yolo) yolo=true; shift;;
+    --await-human) await_human=true; shift;;
+    --id|--project|--kind|--agent|--brief|--resume|--profile|--model|--effort|--base|--share|--permission-mode|--lane)
       [[ $# -ge 2 ]] || die "Missing value for $1"
       case $1 in
         --id) id=$2;; --project) project=$2;; --kind) kind=$2;;
         --profile) profile=$2;; --model) model=$2;; --effort) effort=$2;;
         --agent) harness=$2;; --brief) brief=$2;; --resume) resume=$2;;
-        --base) base_arg=$2;; --share) share_arg=$2;;
+        --base) base_arg=$2;; --share) share_arg=$2;; --permission-mode) permission_mode=$2;;
+        --lane) lane=$2;;
       esac; shift 2;;
     *) usage >&2; die "Unknown argument: $1";;
   esac
 done
 if [[ -n $resume ]]; then
-  [[ -z $id$project$kind$harness$brief$profile$model$effort$base_arg$share_arg && $bypass == false ]] || die '--resume cannot be combined with spawn options.'
+  [[ -z $id$project$kind$harness$brief$profile$model$effort$base_arg$share_arg$permission_mode$lane && $bypass == false && $yolo == false && $await_human == false ]] || die '--resume cannot be combined with spawn options.'
   valid_id "$resume"; lock "$STATE/$resume.lock"; load_task "$resume"
 else
   valid_id "$id"
+  [[ -z $lane ]] || valid_id "$lane"
   # Profiles choose defaults; an explicit harness alone preserves the existing native route.
   if [[ -z $profile && -n $harness ]]; then
     profile=custom
@@ -43,6 +47,12 @@ else
   fi
   [[ $effort != default && $effort != - ]] || effort=
   [[ -z $effort || $effort =~ ^[a-z][a-z0-9-]*$ ]] || die 'Invalid effort level.'
+  if [[ -n $lane ]]; then
+    [[ $yolo == false ]] || die '--lane cannot be combined with --yolo.'
+    [[ $await_human == false ]] || die '--lane cannot wait for a human kickoff.'
+    [[ $permission_mode != plan ]] || die '--lane cannot use --permission-mode plan.'
+    [[ $effort != xhigh ]] || die '--lane refuses --effort xhigh.'
+  fi
   [[ $kind == ship || $kind == scout ]] || die '--kind must be ship or scout.'
   [[ -n $project && -n $harness && -f $brief && -s $brief ]] || die 'Project, agent kind and a nonempty brief file are required.'
   [[ -z $base_arg || $base_arg != *[$'\n\r\t']* ]] || die 'Base ref cannot contain control characters.'
@@ -67,6 +77,14 @@ else
     template=$(cut -f5 <<< "$row")
     launch_args=$(jq -cn --argjson args "$launch_args" --argjson template "$template" --arg effort "$effort" \
       '$args + ($template | map(split("{effort}") | join($effort)))')
+  fi
+  if [[ -n $permission_mode ]]; then
+    [[ $permission_mode =~ ^[a-zA-Z][a-zA-Z0-9]*$ ]] || die 'Invalid --permission-mode.'
+    # Replace an existing --permission-mode value, or append the pair.
+    launch_args=$(jq -cn --argjson args "$launch_args" --arg mode "$permission_mode" '
+      ($args | to_entries | map(select(.value == "--permission-mode")) | .[0].key) as $i |
+      if $i != null then ($args | .[$i+1] = $mode)
+      else ($args + ["--permission-mode", $mode]) end')
   fi
   jq -e 'type == "array" and all(.[]; type == "string" and all(explode[]; . >= 32 and . != 127))' <<< "$launch_args" >/dev/null || die 'Invalid model launch arguments.'
   command -v "$harness" >/dev/null || die "Worker CLI is not installed: $harness"
@@ -125,25 +143,30 @@ else
   intended=$STATE/worktrees/$id
   [[ ! -e $intended ]] || die "Worktree path already exists: $intended"
   cp "$brief" "$STATE/$id.brief.md"
-  if [[ $pr_base != "$default" ]]; then
+  if [[ $yolo == true ]]; then
+    [[ $pr_base != "$default" ]] || die '--yolo requires a non-default --base (integration tip to push to).'
+    printf '\n## Yolo delivery (owner-enabled)\n\nBase this work on `%s`. Do **not** open a GitHub PR and do **not** merge via `gh`.\nFast-forward push this branch tip onto `origin/%s` only:\n\n```sh\ngit fetch origin\ngit push origin HEAD:refs/heads/%s\n```\n\nIf the push is not a fast-forward, rebase onto `origin/%s` and retry. Never force-push. Do not push to `%s`.\nRecord usage with no PR (`pr` null / omit PR flags). Put the landed tip SHA in `.crew/report.md` / the done note only - do **not** edit share `CURRENT.md` or other indexes.\nTeardown expects no PR and `crew/<id>` tip identical to updated `origin/%s` after fetch.\n' \
+      "$base" "$pr_base" "$pr_base" "$pr_base" "$default" "$pr_base" >> "$STATE/$id.brief.md"
+  elif [[ $pr_base != "$default" ]]; then
     printf '\n## Stacked delivery\n\nBase this work on `%s`. Open the GitHub PR against `%s`, not `%s`. Do not merge into `%s`.\n' \
       "$base" "$pr_base" "$default" "$default" >> "$STATE/$id.brief.md"
   fi
   if [[ -n $share ]]; then
     playtest_dir=$STATE/playtest/$share
     mkdir -p "$playtest_dir"
-    printf '\n## Shared board\n\nSibling workers on this stack share `.crew/share` (Crew home `state/share/%s`). Read it for landed notes and reviews. Write short updates there when you land something others need. Do not wait or poll siblings.\n' \
+    printf '\n## Shared board\n\nSibling workers on this stack share `.crew/share` (Crew home `state/share/%s`). **Read** authority docs the brief names. Write **only** the single deliverable path the brief names (if any). Do **not** edit `CURRENT.md`, plan amend logs, indexes, memory, or sibling folders to "synthesize" the board - that is the primary'\''s job after you emit done. Do not wait or poll siblings.\n' \
       "$share" >> "$STATE/$id.brief.md"
     printf '\n## Shared playtest root\n\nThis task sets `PLAYTEST_DIR=%s`. Community servers, scenarios, recording tools, and digests must honor this absolute path. Read packets at this source-of-truth path; do not copy them into the worktree.\n' \
       "$playtest_dir" >> "$STATE/$id.brief.md"
   fi
   jq -n --arg id "$id" --arg project "$project" --arg kind "$kind" --arg harness "$harness" \
     --arg path "$intended" --arg base "$base" --arg pr_base "$pr_base" --arg share "$share" \
-    --argjson args "$args" --argjson port "$port" \
-    --arg profile "$profile" --arg model "$model" --arg effort "$effort" --argjson launch_args "$launch_args" \
+    --argjson args "$args" --argjson port "$port" --argjson yolo "$yolo" \
+    --argjson await_human "$([[ $await_human == true ]] && echo true || echo false)" \
+    --arg profile "$profile" --arg model "$model" --arg effort "$effort" --arg lane "$lane" --argjson launch_args "$launch_args" \
     --argjson started "$(date +%s)" '{id:$id,project:$project,kind:$kind,harness:$harness,
       worktree:$path,branch:("crew/"+$id),agent:("crew-"+$id),base:$base,pr_base:$pr_base,
-      share:(if $share=="" then null else $share end),
+      share:(if $share=="" then null else $share end),lane:(if $lane=="" then null else $lane end),yolo:$yolo,await_human:$await_human,
       profile:$profile,model:(if $model=="" then null else $model end),
       effort:(if $effort=="" then null else $effort end),launch_args:$launch_args,
       permission_args:$args,port_base:$port,started:$started,phase:"reserved"}' > "$STATE/$id.meta.tmp"
@@ -218,6 +241,11 @@ if [[ $PHASE == created ]]; then
     printf 'export PORT=%s\nexport CREW_PORT_BASE=%s\nexport CHROME_DEVTOOLS_AXI_SESSION=%s\n' \
       "$port" "$port" "$ID" > "$WORKTREE/.crew/env"
   fi
+  # Lane env is for a later status fast-path. v0 watch does not require the worker to call it.
+  lane_id=$(jq -r '.lane // empty' "$META")
+  if [[ -n $lane_id ]]; then
+    printf 'export CREW_LANE=%q\nexport CREW_ROOT=%q\n' "$lane_id" "$CREW_ROOT" >> "$WORKTREE/.crew/env"
+  fi
   printf '\nCrew assignment: %s (%s). Branch: %s.\nUse PORT=%s and CREW_PORT_BASE=%s. If absent from tool shells, source .crew/env.\nBrowser checks: CHROME_DEVTOOLS_AXI_SESSION=%s is preset; prefer chrome-devtools-axi on PORT. Teardown stops this session and frees the port block.\nUsage: before done, write .crew/usage.json via .crew/crew-usage (Claude: no token flags / --auto prices the session JSONL; else pass input/output/cached tokens and cost). Include PR url for ships. Teardown refuses tasks without valid usage metrics. See docs/usage-schema.md.\n' \
     "$ID" "$KIND" "$BRANCH" "$port" "$port" "$ID" >> "$WORKTREE/.crew/brief.md"
   phase prepared
@@ -244,16 +272,25 @@ fi
 if [[ $PHASE == starting || $PHASE == ready ]]; then
   live=$(agent_state)
   [[ $live == idle || $live == done ]] || die "Agent is $live; clear startup in herdr, then retry --resume."
-  # Mark before sending: a crash across prompt delivery must never silently duplicate work.
-  phase dispatching
-  herdr agent prompt "$AGENT" 'Read .crew/WORKER.md and .crew/brief.md, then do the brief.' > "$STATE/$ID.prompt.json" 2>&1 ||
-    die "Prompt was not confirmed. Inspect $STATE/$ID.prompt.json and the pane before any retry."
-  phase dispatched
-  append_event working spawned
+  if jq -e '.await_human == true' "$META" >/dev/null; then
+    # Consultants / human-driven panes: start the agent, skip the kickoff prompt.
+    phase dispatched
+    append_event working 'awaiting human (no kickoff prompt)'
+  else
+    # Mark before sending: a crash across prompt delivery must never silently duplicate work.
+    phase dispatching
+    herdr agent prompt "$AGENT" 'Read .crew/WORKER.md and .crew/brief.md, then do the brief.' > "$STATE/$ID.prompt.json" 2>&1 ||
+      die "Prompt was not confirmed. Inspect $STATE/$ID.prompt.json and the pane before any retry."
+    phase dispatched
+    append_event working spawned
+  fi
 fi
 printf '%s: %s\nWorkspace: %s; agent: %s; ports: %s-%s\nBoard: %s/bin/status\n' \
   "$ID" "$WORKTREE" "$WORKSPACE" "$AGENT" "$(jq -r .port_base "$META")" \
   "$(($(jq -r .port_base "$META")+9))" "$CREW_ROOT"
+if jq -e '.await_human == true' "$META" >/dev/null; then
+  printf 'Await-human: no kickoff prompt; agent is idle until you message the pane.\n'
+fi
 printf 'Model: %s; effort: %s; profile: %s\n' \
   "$(jq -r '.model // "native default"' "$META")" \
   "$(jq -r '.effort // "native default"' "$META")" \
@@ -264,4 +301,7 @@ printf 'Base: %s; PR target: %s\n' \
 if jq -e '.share != null and .share != ""' "$META" >/dev/null; then
   printf 'Share: %s (worktree .crew/share -> %s/share/%s)\n' \
     "$(jq -r '.share' "$META")" "$STATE" "$(jq -r '.share' "$META")"
+fi
+if jq -e '.lane != null and .lane != ""' "$META" >/dev/null; then
+  printf 'Lane: %s\n' "$(jq -r '.lane' "$META")"
 fi
