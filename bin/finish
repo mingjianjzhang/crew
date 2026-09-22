@@ -34,6 +34,12 @@ lock "$STATE/$id.lock"; load_task "$id"
 [[ $PHASE == dispatched || $PHASE == removing ]] || die "Task phase is $PHASE; finish expects a dispatched checkout."
 verify_worktree
 require_usage_record "$WORKTREE/.crew/usage.json"
+# Closeout is when an unpriced session would otherwise disappear into the rollup.
+blind_line=$(jq -r '
+  if (.costUsd | type) == "number" then ""
+  else "usage blind: \(.taskId) has no costUsd (\(.harness)/\(.model), source \(.source)). Not $0."
+  end' "$WORKTREE/.crew/usage.json")
+[[ -z $blind_line ]] || printf '%s\n' "$blind_line" >&2
 
 live=$(agent_state)
 case $live in

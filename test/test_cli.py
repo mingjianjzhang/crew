@@ -750,6 +750,55 @@ class CrewTest(unittest.TestCase):
         self.assertIn('known_usd: 10.75', everything)
         self.assertIn('old-priced', everything)
 
+    def test_status_prints_blind_cost_line(self):
+        day = self.run_cmd(['date', '-u', '+%Y-%m-%d']).stdout.strip()
+        state = self.crew / 'state'
+        state.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'priced', 'kind': 'ship',
+                'harness': 'claude', 'model': 'claude-opus-5-5',
+                'recordedAt': f'{day}T01:00:00Z', 'source': 'harness',
+                'costUsd': 1.25, 'tokens': {'input': 1, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'blind-ship', 'kind': 'ship',
+                'harness': 'grok', 'model': 'grok-4.7',
+                'recordedAt': f'{day}T02:00:00Z', 'source': 'estimated',
+                'tokens': {'input': 10, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'old-priced', 'kind': 'scout',
+                'harness': 'claude', 'model': 'claude-fable-5-1',
+                'recordedAt': '2020-01-01T00:00:00Z', 'source': 'harness',
+                'costUsd': 9.5, 'tokens': {'input': 1, 'output': 1},
+            },
+        ]
+        (state / 'usage.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        status = self.cli('status').stdout
+        self.assertIn('known $1.25 (1 priced), blind 1 (no costUsd, not $0)', status)
+        self.assertNotIn('9.50', status)
+        self.assertNotIn('old-priced', status)
+
+    def test_finish_warns_when_cost_is_blind(self):
+        self.spawn()
+        self.agent('idle')
+        self.report()
+        result = self.cli('finish', 'one', 'Close the blind scout.')
+        self.assertIn('usage blind: one has no costUsd', result.stderr)
+        self.assertIn('Not $0.', result.stderr)
+        self.assertIn('finished without agent prompt', result.stdout)
+
+    def test_finish_silent_when_cost_is_priced(self):
+        self.spawn()
+        self.agent('idle')
+        (self.worktree() / '.crew/report.md').write_text('Findings.\n')
+        self.usage(cost_usd='2')
+        self.event('done', '.crew/report.md')
+        self.agent('done')
+        result = self.cli('finish', 'one', 'Priced closeout.')
+        self.assertNotIn('usage blind', result.stderr)
+        self.assertIn('finished without agent prompt', result.stdout)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

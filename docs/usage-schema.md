@@ -82,7 +82,9 @@ environment / brief assignment line).
 
 `costUsd` is written even when unknown (`null`). Do not sum `costUsd // 0`:
 that turns unpriced work into free work. `bin/usage` sums only numeric
-`costUsd` and lists null or omitted rows as blind.
+`costUsd` and lists null or omitted rows as blind. `bin/status` prints that
+split for the last three UTC days. `bin/finish` warns on stderr when the
+task being closed has no numeric `costUsd`, and still closes.
 
 ### Claude `--auto`
 
