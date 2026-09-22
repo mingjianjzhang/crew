@@ -104,3 +104,14 @@ replace `/`, `.`, and spaces with `-`), dedups `message.usage` by
 Anthropic list rates (platform.claude.com), including per-message model rates
 for auxiliary calls. Pass `--transcript PATH` to override discovery. If a
 model has no rate row, tokens are still written and `costUsd` stays `null`.
+
+### Grok `--auto`
+
+For Grok workers, the same no-token-flag path reads the harness bill. It runs
+`grok usage "$GROK_SESSION_ID"` and copies `session.inputTokens`,
+`outputTokens`, `cachedReadTokens`, `cacheCreationTokens`, and
+`reasoningTokens`. `costUsd` is `costUsdTicks / 1e10` (10^10 ticks per USD).
+Do not divide by `1e9`, and do not copy `updates.jsonl` `totalTokens` into
+`tokens.input` (that counter is context size). Pass `--grok-usage PATH` to
+read a saved `usage` JSON instead of invoking the CLI. The billed model id
+(`primaryModelId`, often `grok-4.7-build`) is recorded unless `--model` is set.

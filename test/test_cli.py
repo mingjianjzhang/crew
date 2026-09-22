@@ -534,6 +534,52 @@ class CrewTest(unittest.TestCase):
         self.assertEqual(usage['source'], 'harness')
         self.assertEqual(usage['harness'], 'claude')
 
+    def test_crew_usage_grok_auto_prices_session(self):
+        """Grok --auto reads `grok usage` and prices costUsdTicks / 1e10."""
+        self.spawn()
+        wt = self.worktree()
+        fixture = wt / 'grok-usage.json'
+        # totalTokens is a decoy. The helper must use inputTokens, not that counter.
+        fixture.write_text(json.dumps({
+            'sessionId': 'sess-1',
+            'session': {
+                'inputTokens': 6189090,
+                'outputTokens': 68234,
+                'cachedReadTokens': 5154944,
+                'cacheCreationTokens': 0,
+                'reasoningTokens': 40734,
+                'totalTokens': 99999999,
+                'costUsdTicks': 17187571200,
+                'primaryModelId': 'grok-4.7-build',
+            },
+        }))
+        (self.fakebin / 'grok').write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = usage ]; then\n'
+            '  [ "$2" = "$GROK_SESSION_ID" ] || exit 1\n'
+            '  cat "$GROK_USAGE_FIXTURE"\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 0\n'
+        )
+        (self.fakebin / 'grok').chmod(0o755)
+        result = self.run_cmd(
+            [str(wt / '.crew/crew-usage'), '--harness', 'grok'],
+            env=dict(self.env, GROK_SESSION_ID='sess-1', GROK_USAGE_FIXTURE=str(fixture)),
+        )
+        self.assertIn('Auto usage from grok sess-1', result.stderr)
+        usage = json.loads((wt / '.crew/usage.json').read_text())
+        self.assertEqual(usage['tokens']['input'], 6189090)
+        self.assertNotEqual(usage['tokens']['input'], 99999999)
+        self.assertEqual(usage['tokens']['output'], 68234)
+        self.assertEqual(usage['tokens']['cachedRead'], 5154944)
+        self.assertEqual(usage['tokens']['reasoning'], 40734)
+        self.assertAlmostEqual(usage['costUsd'], 1.71875712, places=8)
+        self.assertNotAlmostEqual(usage['costUsd'], 17.1875712, places=4)
+        self.assertEqual(usage['model'], 'grok-4.7-build')
+        self.assertEqual(usage['source'], 'harness')
+        self.assertEqual(usage['harness'], 'grok')
+
     def test_ship_landing_and_local_tip_guard(self):
         self.spawn(kind='ship')
         wt = self.worktree()
