@@ -690,5 +690,66 @@ class CrewTest(unittest.TestCase):
         self.cli('spawn', '--resume', 'one')
         self.assertEqual(self.start_args('one')[1], ['--permission-mode', 'auto'])
 
+    def test_crew_usage_keeps_null_cost_and_warns(self):
+        self.spawn()
+        result = self.usage()
+        self.assertIn('costUsd is null', result.stderr)
+        self.assertIn('not $0', result.stderr)
+        data = json.loads((self.worktree() / '.crew/usage.json').read_text())
+        self.assertIsNone(data['costUsd'])
+        priced = self.usage(cost_usd='1.5')
+        self.assertNotIn('costUsd is null', priced.stderr)
+        data = json.loads((self.worktree() / '.crew/usage.json').read_text())
+        self.assertEqual(data['costUsd'], 1.5)
+        estimated = self.usage(source='estimated')
+        self.assertIn('totalTokens', estimated.stderr)
+        self.assertIsNone(json.loads((self.worktree() / '.crew/usage.json').read_text())['costUsd'])
+
+    def test_usage_rollup_splits_known_and_blind(self):
+        day = self.run_cmd(['date', '-u', '+%Y-%m-%d']).stdout.strip()
+        state = self.crew / 'state'
+        state.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'priced', 'kind': 'ship',
+                'harness': 'claude', 'model': 'claude-opus-5-5',
+                'recordedAt': f'{day}T01:00:00Z', 'source': 'harness',
+                'costUsd': 1.25, 'tokens': {'input': 1, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'blind-ship', 'kind': 'ship',
+                'harness': 'grok', 'model': 'grok-4.7',
+                'recordedAt': f'{day}T02:00:00Z', 'source': 'estimated',
+                'tokens': {'input': 1300000, 'output': 1},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'explicit-null', 'kind': 'scout',
+                'harness': 'grok', 'model': 'grok-4.7',
+                'recordedAt': f'{day}T03:00:00Z', 'source': 'unavailable',
+                'costUsd': None, 'tokens': {'input': 0, 'output': 0},
+            },
+            {
+                'schema': 'crew-usage/v1', 'taskId': 'old-priced', 'kind': 'scout',
+                'harness': 'claude', 'model': 'claude-fable-5-1',
+                'recordedAt': '2020-01-01T00:00:00Z', 'source': 'harness',
+                'costUsd': 9.5, 'tokens': {'input': 1, 'output': 1},
+            },
+        ]
+        (state / 'usage.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        window = self.cli('usage', '--since', day, '--until', day).stdout
+        self.assertIn('records: 3', window)
+        self.assertIn('known_usd: 1.25', window)
+        self.assertIn('priced: 1', window)
+        self.assertIn('blind: 2', window)
+        self.assertIn('blind-ship grok/grok-4.7 ship estimated', window)
+        self.assertIn('explicit-null grok/grok-4.7 scout unavailable', window)
+        self.assertNotIn('old-priced', window)
+        self.assertNotIn('9.50', window)
+        everything = self.cli('usage').stdout
+        self.assertIn('records: 4', everything)
+        self.assertIn('known_usd: 10.75', everything)
+        self.assertIn('old-priced', everything)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

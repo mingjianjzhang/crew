@@ -22,7 +22,7 @@ Optional:
   --cached-read N        Cached read / cache hit tokens (default 0)
   --cache-creation N     Cache write / creation tokens (default 0)
   --reasoning N          Reasoning tokens (default 0)
-  --cost-usd X           Dollar cost (omit for null; --auto fills when priced)
+  --cost-usd X           Dollar cost (omit for null; the key is still written; --auto fills when priced)
   --source harness|estimated|unavailable   (default harness)
   --pr-url URL           Final PR https URL
   --pr-number N          PR number
@@ -287,6 +287,14 @@ fi
 if [[ -n $notes ]]; then
   [[ $notes != *$'\n'* && ${#notes} -le 500 ]] || { echo 'notes must be one short line.' >&2; exit 2; }
 fi
+# Unknown cost stays on the record as null. Omitting the key made rollups treat
+# the session as $0. Estimated input must be billable tokens, not totalTokens.
+if ! $cost_set; then
+  echo 'crew-usage: costUsd is null. Unknown dollars, not $0. Pass --cost-usd when the harness priced the session.' >&2
+  if [[ $source == estimated ]]; then
+    echo 'crew-usage: source=estimated with no costUsd. tokens.input must be billable input, not a context-size counter (totalTokens).' >&2
+  fi
+fi
 
 recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -332,6 +340,6 @@ jq -cn \
     tokens:{input:$input,output:$output,cachedRead:$cachedRead,
             cacheCreation:$cacheCreation,reasoning:$reasoning},
     costUsd:$costUsd,notes:$notes
-  } | with_entries(select(.value != null))' > "$tmp"
+  } | with_entries(select(.value != null or .key == "costUsd"))' > "$tmp"
 mv "$tmp" "$usage_path"
 echo "Wrote $usage_path"

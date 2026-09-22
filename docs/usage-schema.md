@@ -53,7 +53,7 @@ JSON line to `state/usage.jsonl` for session rollups.
 | `tokens.cachedRead` | preferred | Cache hits / cached read tokens; use `0` if unknown |
 | `tokens.cacheCreation` | preferred | Cache write / creation tokens; use `0` if unknown |
 | `tokens.reasoning` | preferred | Hidden/reasoning tokens when reported; else `0` |
-| `costUsd` | preferred | Number or `null` if the harness does not expose $ |
+| `costUsd` | preferred | Number, or `null` when the harness does not expose $. The helper always writes the key. Older rows may omit it; omission means the same as `null` (unknown, not zero). |
 | `notes` | no | Single line, no newlines |
 
 ### `source` values
@@ -61,7 +61,7 @@ JSON line to `state/usage.jsonl` for session rollups.
 | Value | When |
 | --- | --- |
 | `harness` | Copied from the agent CLI / session usage API |
-| `estimated` | Derived from partial counters or screenshots |
+| `estimated` | Derived from partial counters or screenshots. `tokens.input` must be billable input, not a context-size counter such as Grok `totalTokens`. |
 | `unavailable` | Harness exposed nothing usable; token fields may be `0` with an explanation in `notes` |
 
 Workers should prefer `harness`. Use `unavailable` only after a genuine attempt to
@@ -79,6 +79,10 @@ valid - the gate is "emitted a usage record", not "perfect billing data".
 Omit unknown optional flags; the helper fills zeros / nulls and reads task id,
 kind, harness, model, and effort from `.crew` metadata when present (or from
 environment / brief assignment line).
+
+`costUsd` is written even when unknown (`null`). Do not sum `costUsd // 0`:
+that turns unpriced work into free work. `bin/usage` sums only numeric
+`costUsd` and lists null or omitted rows as blind.
 
 ### Claude `--auto`
 
