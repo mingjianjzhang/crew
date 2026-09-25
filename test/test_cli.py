@@ -122,10 +122,111 @@ class CrewTest(unittest.TestCase):
             ('finish', ['one', 'done note']),
             ('teardown', ['one']),
             ('share-retire', ['demo-board']),
+            ('ext-reply', ['drain']),
+            ('ext-reply', ['deliver']),
         ]:
             result = self.cli(name, *args, ok=False, env=env)
             self.assertIn('herdr-managed pane', result.stderr)
         self.assertFalse((self.runtime / 'calls.jsonl').exists())
+
+    def _ext_answer(self, rid='r1', task='one', key='color', text='Blue', **extra):
+        body = {
+            'schema': 'crew-ext-reply/v1',
+            'id': rid,
+            'type': 'answer',
+            'taskId': task,
+            'decisionKey': key,
+            'text': text,
+        }
+        body.update(extra)
+        return json.dumps(body)
+
+    def test_ext_reply_enqueue_without_herdr_and_drain(self):
+        self.spawn()
+        self.event('needs-decision', 'color Which color?')
+        self.agent('idle')
+        env = dict(self.env, HERDR_ENV='0')
+        self.cli('ext-reply', 'enqueue', self._ext_answer(), env=env)
+        inbox = self.crew / 'state/ext-reply/inbox/r1.json'
+        self.assertTrue(inbox.is_file())
+        status = self.cli('ext-reply', 'status', env=env)
+        self.assertIn('1 queued', status.stdout)
+        board = self.cli('status')
+        self.assertIn('ext-reply: 1 queued', board.stdout)
+        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        drain = self.cli('ext-reply', 'drain')
+        self.assertIn('applied', drain.stdout)
+        self.assertFalse(inbox.exists())
+        self.assertTrue((self.crew / 'state/ext-reply/applied/r1.json').is_file())
+        self.assertEqual(
+            (self.worktree() / '.crew/answers/color.md').read_text().strip(),
+            'Blue',
+        )
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before + 1)
+
+    def test_ext_reply_pending_delivery_then_deliver(self):
+        self.spawn()
+        self.event('needs-decision', 'color Which color?')
+        # Agent busy → answer saved, prompt skipped.
+        self.agent('working')
+        self.cli('ext-reply', 'enqueue', self._ext_answer(rid='p1', text='Green'))
+        self.cli('ext-reply', 'drain')
+        self.assertTrue((self.crew / 'state/ext-reply/pending-delivery/p1.json').is_file())
+        self.assertEqual(
+            (self.worktree() / '.crew/answers/color.md').read_text().strip(),
+            'Green',
+        )
+        prompts = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        self.agent('idle')
+        self.cli('ext-reply', 'deliver')
+        self.assertTrue((self.crew / 'state/ext-reply/applied/p1.json').is_file())
+        self.assertFalse((self.crew / 'state/ext-reply/pending-delivery/p1.json').exists())
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), prompts + 1)
+
+    def test_ext_reply_idempotent_redrain_and_ikey(self):
+        self.spawn()
+        self.event('needs-decision', 'color Which color?')
+        self.agent('idle')
+        payload = self._ext_answer(rid='idem1', idempotencyKey='call-9', text='Red')
+        self.cli('ext-reply', 'enqueue', payload)
+        self.cli('ext-reply', 'drain')
+        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        # Re-enqueue same id after apply → no-op success, no second prompt.
+        again = self.cli('ext-reply', 'enqueue', payload)
+        self.assertIn('already applied', again.stdout)
+        self.cli('ext-reply', 'drain')
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before)
+        # Same idempotencyKey, new id → also refused as already applied.
+        other = self.cli(
+            'ext-reply', 'enqueue',
+            self._ext_answer(rid='idem2', idempotencyKey='call-9', text='Red'),
+        )
+        self.assertIn('already applied', other.stdout)
+
+    def test_ext_reply_farewell_refusal_and_spawn_type(self):
+        self.spawn()
+        self.event('needs-decision', 'pr-review Ready for review')
+        self.agent('idle')
+        self.cli(
+            'ext-reply', 'enqueue',
+            self._ext_answer(rid='bye1', key='pr-review', text='Merged. Emit done and refresh usage.'),
+        )
+        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
+        self.cli('ext-reply', 'drain')
+        self.assertTrue((self.crew / 'state/ext-reply/failed/bye1.json').is_file())
+        self.assertFalse((self.worktree() / '.crew/answers/pr-review.md').exists())
+        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before)
+        env = dict(self.env, HERDR_ENV='0')
+        spawn_req = json.dumps({
+            'schema': 'crew-ext-reply/v1',
+            'id': 'spawn1',
+            'type': 'spawn',
+            'taskId': 'follow-r1',
+            'decisionKey': 'n/a',
+            'text': 'ignored',
+        })
+        refused = self.cli('ext-reply', 'enqueue', spawn_req, ok=False, env=env)
+        self.assertIn('not supported in v1', refused.stderr)
 
     def test_share_retire_archives_manifest_paths(self):
         share = self.crew / 'state/share/demo-board'

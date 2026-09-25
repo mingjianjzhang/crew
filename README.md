@@ -149,9 +149,16 @@ bin/status --ack
 bin/answer first-scout scope 'Limit the investigation to the preview server.'
 bin/answer first-scout scope @/path/to/answer.md
 bin/answer first-scout scope --deliver
+bin/ext-reply enqueue '{"schema":"crew-ext-reply/v1","id":"r1","type":"answer","taskId":"first-scout","decisionKey":"scope","text":"Limit to preview."}'
+bin/ext-reply drain
 bin/finish first-scout --decision pr-review 'Merged; primary closeout.'
 bin/teardown first-scout
 ```
+
+Trusted local callers (for example Crew View) may enqueue answers into
+`state/ext-reply/inbox/` without `HERDR_ENV`, then trigger
+`bin/ext-reply drain` inside a herdr-managed pane (or via `herdr pane run`).
+There is no silent Crew poller. See [`docs/ext-reply.md`](docs/ext-reply.md).
 
 `status` reads durable events and one live herdr hint per task without focusing
 worker tabs. `--ack` prints the board and saves event counts from that same
@@ -201,9 +208,11 @@ discarded project changes.
 | `bin/spawn` | Preflight, port reservation, worktree creation, agent launch |
 | `bin/status` | Durable board plus live hints |
 | `bin/answer` | Save a human answer and wake the worker to continue |
+| `bin/ext-reply` | External reply inbox: enqueue outside herdr; drain/deliver inside |
 | `bin/finish` | Zero-token merge/done-only closeout (no agent prompt) |
 | `bin/teardown` | Landing checks, archive, and removal |
 | `bin/share-retire` | Wrap a finished share board; archive disposable paths |
+| `docs/ext-reply.md` | External reply queue contract (`crew-ext-reply/v1`) |
 | `docs/crew-instruments.md` | Post-wave brief/closeout instruments |
 | `lib/common.sh` | Shared locking, JSON metadata, Git identity checks, log reduction |
 | `lib/crew-status` | Tiny append helper copied into each worktree |
