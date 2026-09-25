@@ -41,3 +41,17 @@ done
 if [[ $ack == --ack ]]; then
   printf '%s\n' "$cursor" > "$STATE/seen.tmp"; mv "$STATE/seen.tmp" "$STATE/seen"
 fi
+# Read-only ext-reply hint; never drain here (see docs/ext-reply.md).
+if [[ -d $STATE/ext-reply/inbox ]]; then
+  shopt -s nullglob
+  ext_queued=("$STATE"/ext-reply/inbox/*.json)
+  ext_pending=("$STATE"/ext-reply/pending-delivery/*.json)
+  ext_failed=("$STATE"/ext-reply/failed/*.json)
+  shopt -u nullglob
+  if [[ ${#ext_queued[@]} -gt 0 || ${#ext_pending[@]} -gt 0 || ${#ext_failed[@]} -gt 0 ]]; then
+    printf 'ext-reply: %s queued' "${#ext_queued[@]}"
+    [[ ${#ext_pending[@]} -eq 0 ]] || printf ', %s pending-delivery' "${#ext_pending[@]}"
+    [[ ${#ext_failed[@]} -eq 0 ]] || printf ', %s failed' "${#ext_failed[@]}"
+    printf ' (bin/ext-reply drain|deliver)\n'
+  fi
+fi

@@ -11,12 +11,18 @@ Read the task board with `bin/status --ack`.
 Report open decisions, pending answers, and tasks needing attention.
 Report the unread done or failed events printed by the board.
 `--ack` advances the shared `state/seen` cursor for that snapshot.
+If `bin/status` or `bin/ext-reply status` shows queued external replies, run `bin/ext-reply drain` (and `bin/ext-reply deliver` when items are pending-delivery).
+Do not add a background poller; apply is request-driven inside herdr (including UI-triggered `herdr pane run` of drain).
 
 Never wait for workers, poll their state, or arrange a wake-up.
 Do not focus worker panes; preserve herdr's unread indicators.
 
 Outside a herdr-managed pane, read state and task files directly.
-Do not run Crew scripts. They require `HERDR_ENV=1`.
+Do not run Crew scripts that mutate tasks.
+They require `HERDR_ENV=1`.
+`bin/ext-reply enqueue` and `bin/ext-reply status` are the exception: they only touch `state/ext-reply/` and may run outside herdr so a local UI can queue answers.
+Drain and deliver still require herdr.
+See `docs/ext-reply.md`.
 
 ## Dispatching work
 
@@ -198,3 +204,4 @@ only when a human operator instructs that directly in the brief or via
 
 Keep Crew small: no supervisors, polling loops, automatic retries,
 harness extensions, or additional orchestration layers.
+The external-reply inbox is drained only on explicit `bin/ext-reply drain` (or deliver) under herdr — never by a silent Crew watcher.

@@ -1,0 +1,333 @@
+#!/usr/bin/env bash
+# External reply queue: callers outside herdr enqueue; apply only under HERDR_ENV=1.
+# v1 handles type=answer by calling bin/answer. See docs/ext-reply.md.
+source "$(dirname "$0")/../lib/common.sh"
+
+usage() {
+  echo 'Usage: bin/ext-reply enqueue @FILE|JSON'
+  echo '       bin/ext-reply status'
+  echo '       bin/ext-reply drain|apply'
+  echo '       bin/ext-reply deliver'
+  echo '  enqueue/status do not require HERDR_ENV. drain/apply/deliver do.'
+  echo '  v1 drain accepts type=answer only.'
+}
+
+EXT_REPLY=
+ensure_ext_reply_dirs() {
+  EXT_REPLY=$STATE/ext-reply
+  mkdir -p "$EXT_REPLY/inbox" "$EXT_REPLY/processing" "$EXT_REPLY/applied/by-key" \
+    "$EXT_REPLY/failed" "$EXT_REPLY/pending-delivery"
+  chmod 700 "$EXT_REPLY" "$EXT_REPLY/inbox" "$EXT_REPLY/processing" "$EXT_REPLY/applied" \
+    "$EXT_REPLY/applied/by-key" "$EXT_REPLY/failed" "$EXT_REPLY/pending-delivery" 2>/dev/null || true
+}
+
+# Lightweight bootstrap for enqueue/status (no herdr, no HERDR_ENV).
+require_state() {
+  command -v jq >/dev/null || die 'Missing dependency: jq'
+  mkdir -p "$STATE" "$CREW_ROOT/data"
+  ensure_ext_reply_dirs
+}
+
+valid_request_id() {
+  [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "Invalid request id: $1"
+}
+
+valid_idempotency_key() {
+  [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "Invalid idempotencyKey: $1"
+}
+
+count_json() {
+  local dir=$1 n=0
+  shopt -s nullglob
+  local files=("$dir"/*.json)
+  n=${#files[@]}
+  shopt -u nullglob
+  printf '%s\n' "$n"
+}
+
+read_request_arg() {
+  local arg=$1
+  if [[ $arg == @* ]]; then
+    [[ -f ${arg#@} && ! -L ${arg#@} ]] || die "Request file missing: ${arg#@}"
+    cat "${arg#@}"
+  else
+    printf '%s\n' "$arg"
+  fi
+}
+
+# Validate crew-ext-reply/v1 shape for enqueue. Returns via globals REQ_*.
+validate_request_json() {
+  local raw=$1
+  jq -e 'type == "object"' <<< "$raw" >/dev/null || die 'Request must be a JSON object.'
+  local schema type id
+  schema=$(jq -r '.schema // empty' <<< "$raw")
+  [[ $schema == crew-ext-reply/v1 ]] || die "Unsupported schema: ${schema:-missing} (need crew-ext-reply/v1)."
+  id=$(jq -r '.id // empty' <<< "$raw")
+  [[ -n $id ]] || die 'Request id is required.'
+  valid_request_id "$id"
+  type=$(jq -r '.type // empty' <<< "$raw")
+  case $type in
+    answer) ;;
+    spawn|finish) die "type=$type is not supported in v1; enqueue answer only for now." ;;
+    *) die "Unknown or missing type: ${type:-empty}" ;;
+  esac
+  local task key text force ikey
+  task=$(jq -r '.taskId // empty' <<< "$raw")
+  key=$(jq -r '.decisionKey // empty' <<< "$raw")
+  text=$(jq -r '.text // empty' <<< "$raw")
+  [[ -n $task ]] || die 'taskId is required.'
+  valid_id "$task"
+  [[ -n $key ]] || die 'decisionKey is required.'
+  valid_key "$key"
+  [[ -n $text ]] || die 'text is required and cannot be empty.'
+  [[ ${#text} -le 3000 ]] || die 'text must be at most 3000 characters.'
+  force=$(jq -r 'if .force == true then "1" else "" end' <<< "$raw")
+  ikey=$(jq -r '.idempotencyKey // empty' <<< "$raw")
+  [[ -z $ikey ]] || valid_idempotency_key "$ikey"
+  REQ_ID=$id
+  REQ_TYPE=$type
+  REQ_TASK=$task
+  REQ_KEY=$key
+  REQ_TEXT=$text
+  REQ_FORCE=$force
+  REQ_IKEY=$ikey
+  REQ_RAW=$(jq -c . <<< "$raw")
+}
+
+write_receipt() {
+  local dest=$1 state=$2 error=${3:-}
+  local at now
+  now=$(date +%s)
+  local tmp
+  tmp=$(mktemp "$EXT_REPLY/.receipt.XXXXXX")
+  jq -n --arg schema crew-ext-reply/v1 --arg id "$REQ_ID" --arg state "$state" \
+    --arg type "$REQ_TYPE" --arg taskId "$REQ_TASK" --arg decisionKey "$REQ_KEY" \
+    --argjson at "$now" --arg error "$error" --argjson request "$REQ_RAW" \
+    '{schema:$schema,id:$id,state:$state,type:$type,taskId:$taskId,decisionKey:$decisionKey,
+      at:$at,error:(if $error=="" then null else $error end),request:$request}' > "$tmp"
+  mv "$tmp" "$dest"
+  if [[ -n $REQ_IKEY && $state == applied ]]; then
+    ln -sfn "../$REQ_ID.json" "$EXT_REPLY/applied/by-key/$REQ_IKEY.json" 2>/dev/null ||
+      cp "$dest" "$EXT_REPLY/applied/by-key/$REQ_IKEY.json"
+  fi
+}
+
+cmd_enqueue() {
+  [[ $# == 1 ]] || { usage >&2; die 'enqueue requires @FILE or JSON.'; }
+  require_state
+  local raw
+  raw=$(read_request_arg "$1")
+  validate_request_json "$raw"
+  # Idempotent: already applied under this id or idempotency key.
+  if [[ -f $EXT_REPLY/applied/$REQ_ID.json ]]; then
+    echo "ext-reply: $REQ_ID already applied."
+    exit 0
+  fi
+  if [[ -n $REQ_IKEY && -e $EXT_REPLY/applied/by-key/$REQ_IKEY.json ]]; then
+    echo "ext-reply: idempotencyKey $REQ_IKEY already applied."
+    exit 0
+  fi
+  if [[ -f $EXT_REPLY/inbox/$REQ_ID.json || -f $EXT_REPLY/pending-delivery/$REQ_ID.json || -f $EXT_REPLY/processing/$REQ_ID.json ]]; then
+    echo "ext-reply: $REQ_ID already queued."
+    exit 0
+  fi
+  local tmp
+  tmp=$(mktemp "$EXT_REPLY/inbox/.enqueue.XXXXXX")
+  # Normalize: ensure createdAt present.
+  jq --argjson created "$(date +%s)" '. + (if .createdAt then {} else {createdAt:$created} end)' <<< "$REQ_RAW" > "$tmp"
+  mv "$tmp" "$EXT_REPLY/inbox/$REQ_ID.json"
+  echo "ext-reply: queued $REQ_ID (type=$REQ_TYPE task=$REQ_TASK key=$REQ_KEY)."
+}
+
+cmd_status() {
+  require_state
+  local queued pending failed processing applied
+  queued=$(count_json "$EXT_REPLY/inbox")
+  pending=$(count_json "$EXT_REPLY/pending-delivery")
+  failed=$(count_json "$EXT_REPLY/failed")
+  processing=$(count_json "$EXT_REPLY/processing")
+  applied=$(count_json "$EXT_REPLY/applied")
+  printf 'ext-reply: %s queued, %s pending-delivery, %s failed, %s processing, %s applied\n' \
+    "$queued" "$pending" "$failed" "$processing" "$applied"
+  if [[ $queued -gt 0 || $pending -gt 0 || $failed -gt 0 || $processing -gt 0 ]]; then
+    shopt -s nullglob
+    local f
+    for f in "$EXT_REPLY/inbox"/*.json; do
+      jq -r '"  queued: \(.id) answer \(.taskId)/\(.decisionKey)"' "$f" 2>/dev/null || echo "  queued: $(basename "$f")"
+    done
+    for f in "$EXT_REPLY/pending-delivery"/*.json; do
+      jq -r '"  pending-delivery: \(.id // .request.id) \(.taskId // .request.taskId)/\(.decisionKey // .request.decisionKey)"' "$f" 2>/dev/null ||
+        echo "  pending-delivery: $(basename "$f")"
+    done
+    for f in "$EXT_REPLY/failed"/*.json; do
+      jq -r '"  failed: \(.id) \(.error // "unknown")"' "$f" 2>/dev/null || echo "  failed: $(basename "$f")"
+    done
+    for f in "$EXT_REPLY/processing"/*.json; do
+      echo "  processing: $(basename "$f" .json) (inspect; re-queue or fail explicitly)"
+    done
+    shopt -u nullglob
+  fi
+}
+
+fail_request() {
+  local path=$1 error=$2
+  validate_request_json "$(cat "$path")"
+  write_receipt "$EXT_REPLY/failed/$REQ_ID.json" failed "$error"
+  rm -f "$path"
+  echo "ext-reply: failed $REQ_ID: $error" >&2
+}
+
+apply_answer() {
+  local path=$1
+  validate_request_json "$(cat "$path")"
+  if [[ -f $EXT_REPLY/applied/$REQ_ID.json ]]; then
+    rm -f "$path"
+    echo "ext-reply: $REQ_ID already applied (idempotent)."
+    return 0
+  fi
+  if [[ -n $REQ_IKEY && -e $EXT_REPLY/applied/by-key/$REQ_IKEY.json ]]; then
+    rm -f "$path"
+    echo "ext-reply: idempotencyKey $REQ_IKEY already applied (idempotent)."
+    return 0
+  fi
+  if [[ $REQ_TYPE != answer ]]; then
+    fail_request "$path" "type=$REQ_TYPE not supported in v1"
+    return 1
+  fi
+
+  local textfile out rc=0
+  textfile=$(mktemp "$EXT_REPLY/.answer-text.XXXXXX")
+  printf '%s\n' "$REQ_TEXT" > "$textfile"
+  local args=()
+  [[ -z $REQ_FORCE ]] || args+=(--force)
+  args+=("$REQ_TASK" "$REQ_KEY" "@$textfile")
+  set +e
+  out=$("$CREW_ROOT/bin/answer" "${args[@]}" 2>&1)
+  rc=$?
+  set -e
+  rm -f "$textfile"
+
+  if [[ $rc -ne 0 ]]; then
+    fail_request "$path" "$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    return 1
+  fi
+
+  if printf '%s\n' "$out" | grep -q 'delivery pending'; then
+    write_receipt "$EXT_REPLY/pending-delivery/$REQ_ID.json" pending_delivery
+    rm -f "$path" "$EXT_REPLY/failed/$REQ_ID.json"
+    echo "ext-reply: $REQ_ID answer saved, delivery pending."
+    return 0
+  fi
+
+  write_receipt "$EXT_REPLY/applied/$REQ_ID.json" applied
+  rm -f "$path" "$EXT_REPLY/failed/$REQ_ID.json"
+  echo "ext-reply: $REQ_ID applied (answer delivered)."
+}
+
+cmd_drain() {
+  require_runtime
+  ensure_ext_reply_dirs
+  lock "$STATE/.ext-reply.lock"
+  shopt -s nullglob
+  local files=("$EXT_REPLY/inbox"/*.json) f dest
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo 'ext-reply: nothing queued.'
+    return 0
+  fi
+  local applied_n=0 pending_n=0 failed_n=0
+  for f in "${files[@]}"; do
+    dest=$EXT_REPLY/processing/$(basename "$f")
+    if ! mv "$f" "$dest" 2>/dev/null; then
+      echo "ext-reply: skip $(basename "$f") (could not claim)." >&2
+      continue
+    fi
+    if apply_answer "$dest"; then
+      if [[ -f $EXT_REPLY/pending-delivery/$(basename "$dest") ]]; then
+        pending_n=$((pending_n + 1))
+      else
+        applied_n=$((applied_n + 1))
+      fi
+    else
+      failed_n=$((failed_n + 1))
+    fi
+  done
+  shopt -u nullglob
+  printf 'ext-reply: drain done (%s applied, %s pending-delivery, %s failed).\n' \
+    "$applied_n" "$pending_n" "$failed_n"
+}
+
+deliver_one() {
+  local path=$1
+  # Receipt or original request may be stored.
+  local raw task key id force
+  raw=$(cat "$path")
+  if jq -e '.request' <<< "$raw" >/dev/null 2>&1; then
+    id=$(jq -r '.id' <<< "$raw")
+    task=$(jq -r '.taskId' <<< "$raw")
+    key=$(jq -r '.decisionKey' <<< "$raw")
+    force=$(jq -r 'if .request.force == true then "1" else "" end' <<< "$raw")
+    REQ_RAW=$(jq -c '.request' <<< "$raw")
+  else
+    validate_request_json "$raw"
+    id=$REQ_ID
+    task=$REQ_TASK
+    key=$REQ_KEY
+    force=$REQ_FORCE
+  fi
+  REQ_ID=$id
+  REQ_TYPE=answer
+  REQ_TASK=$task
+  REQ_KEY=$key
+  REQ_FORCE=$force
+  REQ_IKEY=$(jq -r '.request.idempotencyKey // .idempotencyKey // empty' <<< "$raw")
+  [[ -n ${REQ_RAW:-} ]] || REQ_RAW=$raw
+
+  local args=() out rc=0
+  [[ -z $force ]] || args+=(--force)
+  args+=("$task" "$key" --deliver)
+  set +e
+  out=$("$CREW_ROOT/bin/answer" "${args[@]}" 2>&1)
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    write_receipt "$EXT_REPLY/failed/$id.json" failed "$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    rm -f "$path"
+    echo "ext-reply: deliver failed $id" >&2
+    return 1
+  fi
+  if printf '%s\n' "$out" | grep -q 'delivery pending'; then
+    echo "ext-reply: $id still pending delivery."
+    return 0
+  fi
+  write_receipt "$EXT_REPLY/applied/$id.json" applied
+  rm -f "$path"
+  echo "ext-reply: $id delivered."
+}
+
+cmd_deliver() {
+  require_runtime
+  ensure_ext_reply_dirs
+  lock "$STATE/.ext-reply.lock"
+  shopt -s nullglob
+  local files=("$EXT_REPLY/pending-delivery"/*.json)
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo 'ext-reply: nothing pending delivery.'
+    return 0
+  fi
+  local f
+  for f in "${files[@]}"; do
+    deliver_one "$f" || true
+  done
+  shopt -u nullglob
+}
+
+[[ ${1:-} != --help ]] || { usage; exit 0; }
+[[ $# -ge 1 ]] || { usage >&2; die 'Subcommand required.'; }
+
+case $1 in
+  enqueue) shift; cmd_enqueue "$@" ;;
+  status) shift; [[ $# == 0 ]] || die 'status takes no arguments.'; cmd_status ;;
+  drain|apply) shift; [[ $# == 0 ]] || die 'drain takes no arguments.'; cmd_drain ;;
+  deliver) shift; [[ $# == 0 ]] || die 'deliver takes no arguments.'; cmd_deliver ;;
+  *) usage >&2; die "Unknown subcommand: $1" ;;
+esac
