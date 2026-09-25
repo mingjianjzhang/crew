@@ -156,6 +156,7 @@ summarize_claude_transcript() {
         {k:"claude-mythos-5-1",  rin:10,   rout:50,   cr:0.25, c5:12.5,  c1:20},
         {k:"claude-fable-5",     rin:10,   rout:50,   cr:1,    c5:12.5,  c1:20},
         {k:"claude-mythos-5",    rin:10,   rout:50,   cr:1,    c5:12.5,  c1:20},
+        {k:"claude-opus-5-5",    rin:4,    rout:20,   cr:0.2,  c5:5,     c1:8},
         {k:"claude-opus-5",      rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
         {k:"claude-opus-4-8",    rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},
         {k:"claude-opus-4-7",    rin:5,    rout:25,   cr:0.5,  c5:6.25,  c1:10},

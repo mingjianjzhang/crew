@@ -54,8 +54,6 @@ if [[ $PHASE != removed && $PHASE != removing ]]; then
   PHASE=removing
 fi
 if [[ $PHASE == removing ]]; then
-  # state/playtest roots are the durable packet source of truth. They are
-  # intentionally retained across teardown; cleanup is manual/out of scope.
   if [[ -d $WORKTREE ]]; then
     verify_worktree
     verify_workspace

@@ -22,7 +22,7 @@ with a receipt.
 
 Primary tip-syncs merged ship tips **before** finish when local HEAD ≠ merged `headRefOid`.
 
-Use `bin/answer` only when the worker must **continue** (code fix, redesign, hosted-session resume).
+Use `bin/answer` only when the worker must **continue** (code fix, redesign).
 
 ## Guardrail
 

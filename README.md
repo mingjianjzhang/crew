@@ -2,25 +2,7 @@
 
 Small, request-driven dispatch on herdr. A primary writes a brief, launches
 an isolated worker, and ends its turn. The human supervises through herdr
-and asks the primary for updates. There is no polling service or automatic wake-up.
-
-## Remediation / debugging sessions
-
-Crew supports two explicit Debugging Agent intake modes. The role lives in the
-brief; it is not a new profile, service, or task kind.
-
-| Mode | Primary intake | Worker handoff |
-| --- | --- | --- |
-| `hosted-debug-session` | Human asks to start a Community session without a packet; pass the tested `--base`, `--share`, and `fix`/`investigate` intent. | Worker starts Community on task `PORT`, honors `PLAYTEST_DIR`, reports URL/root and filing locations, then waits on `hosted-session-ready`. Human playtests and the primary resumes with `bin/answer`. |
-| `packet-path` | Human supplies an absolute existing packet and explicit `fix` or `investigate` intent. | Worker reads the packet at its shared source-of-truth path, without copying it or inventing a reproduction, then applies the evidence gate. |
-
-For hosted mode, the primary spawns once and stops; after the human files a
-bug under `$PLAYTEST_DIR/bugs/<id>/` (recordings are under
-`$PLAYTEST_DIR` today), the primary answers the waiting task. The worker then
-summarizes the evidence and delivers a fix PR or findings. See the
-[Debugging Agent design](docs/design-remediation-debugging-agent.md) and
-[remediation plan](docs/plan-remediation-loop.md) for the brief contract and
-phase details.
+and asks the primary for updates. 
 
 ## Requirements
 
@@ -82,29 +64,32 @@ Use a different ID for every task, including after teardown.
 
 ## Worker models
 
-With no model options, spawn uses **Luna, High, through Pi**. The primary
+With no model options, spawn uses **GPT-6-Luna, High, through Pi**. The primary
 selects a profile from the task's needs; scripts do not guess from brief text.
 Task type (`ship` or `scout`) is independent of model profile.
 
 | Profile | Use | Harness | Model | Reasoning effort |
 | --- | --- | --- | --- | --- |
-| `default` | Unspecified or other work | Pi | GPT-5.6-Luna | High |
-| `planning` | Complex planning or adversarial review | Pi | GPT-6-Astra | High |
-| `mechanics` | Domain / envelope / greenfield mechanics | Pi | GPT-5.6-Sol | xHigh |
-| `routine` | Clear-spec feature implementation in an existing project, not greenfield | Pi | GPT-5.6-Luna | High |
+| `default` | Unspecified or other work | Pi | GPT-6-Luna | High |
+| `planning` | High-level project planning | Grok | Grok 4.5 | High |
+| `adversarial` | Adversarial review | Pi | GPT-6-Astra | High |
+| `mechanics` | Domain / rules / envelope / greenfield mechanics | Pi | GPT-6-Sol | High |
+| `artwork` | Artwork/UI design and art/UI integration | Claude | Opus 5.5 | xHigh |
+| `routine` | Clear-spec feature implementation in an existing project, not greenfield | Pi | GPT-6-Luna | High |
 | `new-feature` | Well-specified new feature implementation | Claude | Sonnet 5 | Native default |
 
-OpenAI profiles use Pi, not Codex. Pi has no approval sandbox, so pass
-`--unattended-bypass` for `default`, `planning`, `routine`, and `mechanics`. Codex remains
-available only via an explicit `--agent codex` custom route.
+Pi profiles need `--unattended-bypass` (`default`, `adversarial`, `routine`,
+`mechanics`). Grok/`planning` and Claude/`artwork`/`new-feature` do not.
+Codex remains available only via an explicit `--agent codex` custom route.
 
 ```sh
 # Add to your usual spawn command:
-# --profile planning --unattended-bypass
+# --profile planning
+# --profile adversarial --unattended-bypass
 # --profile mechanics --unattended-bypass
+# --profile artwork
 # --profile routine --unattended-bypass
 # --profile new-feature
-# --profile planning --effort xhigh --unattended-bypass
 ```
 
 `profiles.tsv` owns this mapping, using explicit model IDs rather than moving
@@ -116,21 +101,6 @@ specified for that profile.
 Prefer a shared remote branch such as `crew/ipf`; spawn stores `origin/crew/ipf`
 when that remote-tracking ref exists, records `pr_base` for PR targeting, and
 appends a stacked-delivery note to the brief.
-
-`--share ID` attaches the worker to a Crew-home shared board at
-`state/share/<ID>/`, symlinked into the worktree as `.crew/share`. Sibling
-workers on the same stack read and write short Markdown notes there (landed
-PRs, review reports, contract gotchas). Omitted `--share` with a non-default
-`--base` derives the id from the base branch name; use `--share none` to skip.
-When basing on a PR head, pass the integration stack id explicitly
-(`--share crew-ipf`). Teardown does not delete the share directory; use
-`bin/share-retire` when the stack itself is finished.
-
-A shared task also gets the durable Crew-home playtest root
-`state/playtest/<ID>/`, exposed to the worker as the absolute `PLAYTEST_DIR`.
-Community servers and recording/digest tools should use it as the packet source
-of truth; teardown intentionally retains it. With no share (or `--share none`),
-`PLAYTEST_DIR` is unset and Community keeps its worktree-local `.playtest/`.
 
 For backward compatibility and explicit harness choices, `--agent KIND` without
 `--profile` keeps that CLI's native model and effort defaults. Add `--model` and
@@ -149,16 +119,9 @@ bin/status --ack
 bin/answer first-scout scope 'Limit the investigation to the preview server.'
 bin/answer first-scout scope @/path/to/answer.md
 bin/answer first-scout scope --deliver
-bin/ext-reply enqueue '{"schema":"crew-ext-reply/v1","id":"r1","type":"answer","taskId":"first-scout","decisionKey":"scope","text":"Limit to preview."}'
-bin/ext-reply drain
 bin/finish first-scout --decision pr-review 'Merged; primary closeout.'
 bin/teardown first-scout
 ```
-
-Trusted local callers (for example Crew View) may enqueue answers into
-`state/ext-reply/inbox/` without `HERDR_ENV`, then trigger
-`bin/ext-reply drain` inside a herdr-managed pane (or via `herdr pane run`).
-There is no silent Crew poller. See [`docs/ext-reply.md`](docs/ext-reply.md).
 
 `status` reads durable events and one live herdr hint per task without focusing
 worker tabs. `--ack` prints the board and saves event counts from that same
@@ -208,11 +171,8 @@ discarded project changes.
 | `bin/spawn` | Preflight, port reservation, worktree creation, agent launch |
 | `bin/status` | Durable board plus live hints |
 | `bin/answer` | Save a human answer and wake the worker to continue |
-| `bin/ext-reply` | External reply inbox: enqueue outside herdr; drain/deliver inside |
 | `bin/finish` | Zero-token merge/done-only closeout (no agent prompt) |
 | `bin/teardown` | Landing checks, archive, and removal |
-| `bin/share-retire` | Wrap a finished share board; archive disposable paths |
-| `docs/ext-reply.md` | External reply queue contract (`crew-ext-reply/v1`) |
 | `docs/crew-instruments.md` | Post-wave brief/closeout instruments |
 | `lib/common.sh` | Shared locking, JSON metadata, Git identity checks, log reduction |
 | `lib/crew-status` | Tiny append helper copied into each worktree |
@@ -297,7 +257,7 @@ whether a prompt is accepted by a particular harness.
 | Check | Result | Additional thoughts |
 | --- | --- | --- |
 | Launch the scout above; primary ends its turn and worker writes its report without approval stalls | | |
-| Launch planning, routine/default, and new-feature profiles; confirm the CLI shows the requested model and effort | | |
+| Launch planning, adversarial, mechanics, artwork, routine/default, and new-feature profiles; confirm the CLI shows the requested model and effort | | |
 | Repeat with another installed worker kind and another primary CLI | | |
 | Confirm a worker's tool shell sees its assigned `PORT` and `CREW_PORT_BASE` | | |
 | Ask a scout brief to record a decision and stop; answer from the primary and confirm continuation | | |

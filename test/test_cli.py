@@ -121,155 +121,10 @@ class CrewTest(unittest.TestCase):
             ('answer', ['one', 'key', 'text']),
             ('finish', ['one', 'done note']),
             ('teardown', ['one']),
-            ('share-retire', ['demo-board']),
-            ('ext-reply', ['drain']),
-            ('ext-reply', ['deliver']),
         ]:
             result = self.cli(name, *args, ok=False, env=env)
             self.assertIn('herdr-managed pane', result.stderr)
         self.assertFalse((self.runtime / 'calls.jsonl').exists())
-
-    def _ext_answer(self, rid='r1', task='one', key='color', text='Blue', **extra):
-        body = {
-            'schema': 'crew-ext-reply/v1',
-            'id': rid,
-            'type': 'answer',
-            'taskId': task,
-            'decisionKey': key,
-            'text': text,
-        }
-        body.update(extra)
-        return json.dumps(body)
-
-    def test_ext_reply_enqueue_without_herdr_and_drain(self):
-        self.spawn()
-        self.event('needs-decision', 'color Which color?')
-        self.agent('idle')
-        env = dict(self.env, HERDR_ENV='0')
-        self.cli('ext-reply', 'enqueue', self._ext_answer(), env=env)
-        inbox = self.crew / 'state/ext-reply/inbox/r1.json'
-        self.assertTrue(inbox.is_file())
-        status = self.cli('ext-reply', 'status', env=env)
-        self.assertIn('1 queued', status.stdout)
-        board = self.cli('status')
-        self.assertIn('ext-reply: 1 queued', board.stdout)
-        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
-        drain = self.cli('ext-reply', 'drain')
-        self.assertIn('applied', drain.stdout)
-        self.assertFalse(inbox.exists())
-        self.assertTrue((self.crew / 'state/ext-reply/applied/r1.json').is_file())
-        self.assertEqual(
-            (self.worktree() / '.crew/answers/color.md').read_text().strip(),
-            'Blue',
-        )
-        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before + 1)
-
-    def test_ext_reply_pending_delivery_then_deliver(self):
-        self.spawn()
-        self.event('needs-decision', 'color Which color?')
-        # Agent busy → answer saved, prompt skipped.
-        self.agent('working')
-        self.cli('ext-reply', 'enqueue', self._ext_answer(rid='p1', text='Green'))
-        self.cli('ext-reply', 'drain')
-        self.assertTrue((self.crew / 'state/ext-reply/pending-delivery/p1.json').is_file())
-        self.assertEqual(
-            (self.worktree() / '.crew/answers/color.md').read_text().strip(),
-            'Green',
-        )
-        prompts = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
-        self.agent('idle')
-        self.cli('ext-reply', 'deliver')
-        self.assertTrue((self.crew / 'state/ext-reply/applied/p1.json').is_file())
-        self.assertFalse((self.crew / 'state/ext-reply/pending-delivery/p1.json').exists())
-        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), prompts + 1)
-
-    def test_ext_reply_idempotent_redrain_and_ikey(self):
-        self.spawn()
-        self.event('needs-decision', 'color Which color?')
-        self.agent('idle')
-        payload = self._ext_answer(rid='idem1', idempotencyKey='call-9', text='Red')
-        self.cli('ext-reply', 'enqueue', payload)
-        self.cli('ext-reply', 'drain')
-        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
-        # Re-enqueue same id after apply → no-op success, no second prompt.
-        again = self.cli('ext-reply', 'enqueue', payload)
-        self.assertIn('already applied', again.stdout)
-        self.cli('ext-reply', 'drain')
-        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before)
-        # Same idempotencyKey, new id → also refused as already applied.
-        other = self.cli(
-            'ext-reply', 'enqueue',
-            self._ext_answer(rid='idem2', idempotencyKey='call-9', text='Red'),
-        )
-        self.assertIn('already applied', other.stdout)
-
-    def test_ext_reply_farewell_refusal_and_spawn_type(self):
-        self.spawn()
-        self.event('needs-decision', 'pr-review Ready for review')
-        self.agent('idle')
-        self.cli(
-            'ext-reply', 'enqueue',
-            self._ext_answer(rid='bye1', key='pr-review', text='Merged. Emit done and refresh usage.'),
-        )
-        before = sum(c[:2] == ['agent', 'prompt'] for c in self.calls())
-        self.cli('ext-reply', 'drain')
-        self.assertTrue((self.crew / 'state/ext-reply/failed/bye1.json').is_file())
-        self.assertFalse((self.worktree() / '.crew/answers/pr-review.md').exists())
-        self.assertEqual(sum(c[:2] == ['agent', 'prompt'] for c in self.calls()), before)
-        env = dict(self.env, HERDR_ENV='0')
-        spawn_req = json.dumps({
-            'schema': 'crew-ext-reply/v1',
-            'id': 'spawn1',
-            'type': 'spawn',
-            'taskId': 'follow-r1',
-            'decisionKey': 'n/a',
-            'text': 'ignored',
-        })
-        refused = self.cli('ext-reply', 'enqueue', spawn_req, ok=False, env=env)
-        self.assertIn('not supported in v1', refused.stderr)
-
-    def test_share_retire_archives_manifest_paths(self):
-        share = self.crew / 'state/share/demo-board'
-        playtest = self.crew / 'state/playtest/demo-board'
-        (share / 'updates').mkdir(parents=True)
-        (share / 'pack' / 'study' / 'frames').mkdir(parents=True)
-        (share / 'README.md').write_text('# board\n')
-        (share / 'updates' / 'old.md').write_text('landed\n')
-        (share / 'pack' / 'study' / 'frames' / 'a.png').write_text('png\n')
-        (share / 'pack' / 'owner-freeze.md').write_text('keep\n')
-        playtest.mkdir(parents=True)
-        (playtest / 'keep.txt').write_text('playtest\n')
-
-        init = self.cli('share-retire', 'demo-board', '--init')
-        self.assertIn('RETIRE.manifest', init.stdout)
-        manifest = share / 'RETIRE.manifest'
-        self.assertTrue(manifest.is_file())
-        self.assertTrue((share / 'CURRENT.md').is_file())
-        # Keep only heavy disposables; leave owner freeze on the board.
-        manifest.write_text('updates/\npack/study/\n')
-
-        dry = self.cli('share-retire', 'demo-board', '--dry-run')
-        self.assertIn('move updates', dry.stdout)
-        self.assertTrue((share / 'updates' / 'old.md').is_file())
-
-        self.cli('share-retire', 'demo-board')
-        self.assertFalse((share / 'updates').exists())
-        self.assertFalse((share / 'pack' / 'study').exists())
-        self.assertTrue((share / 'pack' / 'owner-freeze.md').is_file())
-        self.assertTrue((share / 'README.md').is_file())
-        self.assertEqual((playtest / 'keep.txt').read_text(), 'playtest\n')
-        archives = list((self.crew / 'data/share-retired/demo-board').iterdir())
-        self.assertEqual(len(archives), 1)
-        arch = archives[0]
-        self.assertTrue((arch / 'updates' / 'old.md').is_file())
-        self.assertTrue((arch / 'pack' / 'study' / 'frames' / 'a.png').is_file())
-        self.assertTrue((share / 'RETIRED.md').is_file())
-
-        # Live task on the same share must block a later retire.
-        self.cli('spawn', '--id', 'held', '--project', str(self.project), '--kind', 'scout',
-                 '--agent', 'claude', '--brief', str(self.brief), '--share', 'demo-board')
-        blocked = self.cli('share-retire', 'demo-board', ok=False)
-        self.assertIn('still referenced by live task held', blocked.stderr)
 
     def test_spawn_is_fresh_isolated_and_returns_without_wait(self):
         (self.project / 'hello.txt').write_text('dirty human work\n')
@@ -313,54 +168,23 @@ class CrewTest(unittest.TestCase):
         meta = self.meta('stacked')
         self.assertEqual(meta['base'], 'origin/crew/ipf')
         self.assertEqual(meta['pr_base'], 'crew/ipf')
-        self.assertEqual(meta['share'], 'crew-ipf')
-        playtest_dir = self.crew / 'state/playtest/crew-ipf'
-        self.assertTrue(playtest_dir.is_dir())
+        self.assertNotIn('share', meta)
+        self.assertFalse((self.crew / 'state/playtest').exists())
+        self.assertFalse((self.crew / 'state/share').exists())
         env = (self.worktree('stacked') / '.crew/env').read_text()
-        playtest_shell_path = str(playtest_dir).replace(' ', '\\ ')
-        self.assertIn(f'export PLAYTEST_DIR={playtest_shell_path}', env)
+        self.assertNotIn('PLAYTEST_DIR', env)
         agent = json.loads((self.runtime / 'crew-stacked.json').read_text())
-        self.assertIn(f'PLAYTEST_DIR={playtest_shell_path}', agent['shell_command'])
-        brief = (self.crew / 'state/stacked.brief.md').read_text()
-        self.assertIn(f'PLAYTEST_DIR={playtest_dir}', brief)
+        self.assertNotIn('PLAYTEST_DIR', agent['shell_command'])
         create = next(c for c in self.calls() if c[:2] == ['worktree', 'create'])
         self.assertEqual(create[create.index('--base') + 1], 'origin/crew/ipf')
         brief = (self.crew / 'state/stacked.brief.md').read_text()
         self.assertIn('Open the GitHub PR against `crew/ipf`', brief)
         self.assertIn('not `main`', brief)
-        self.assertIn('Shared board', brief)
+        self.assertNotIn('Shared board', brief)
+        self.assertNotIn('PLAYTEST_DIR', brief)
         self.assertTrue((self.worktree('stacked') / 'feature.txt').exists())
-        share_link = self.worktree('stacked') / '.crew/share'
-        self.assertTrue(share_link.is_symlink())
-        self.assertEqual(share_link.resolve(), (self.crew / 'state/share/crew-ipf').resolve())
-        self.assertTrue((self.crew / 'state/share/crew-ipf/README.md').is_file())
-        self.assertTrue((self.crew / 'state/share/crew-ipf/updates').is_dir())
-        note = self.crew / 'state/share/crew-ipf/updates/hello.md'
-        note.write_text('from stacked\n')
-        self.assertEqual((share_link / 'updates/hello.md').read_text(), 'from stacked\n')
+        self.assertFalse((self.worktree('stacked') / '.crew/share').exists())
         self.cli('spawn', '--resume', 'stacked', '--base', 'main', ok=False)
-
-    def test_share_explicit_and_none(self):
-        self.git('-C', str(self.project), 'checkout', '-b', 'crew/ipf')
-        self.git('-C', str(self.project), 'commit', '--allow-empty', '-m', 'Integration')
-        self.git('-C', str(self.project), 'push', '-u', 'origin', 'crew/ipf')
-        self.git('-C', str(self.project), 'checkout', '-b', 'crew/ipf-pr1')
-        self.git('-C', str(self.project), 'commit', '--allow-empty', '-m', 'PR head')
-        self.git('-C', str(self.project), 'push', '-u', 'origin', 'crew/ipf-pr1')
-        self.git('-C', str(self.project), 'checkout', 'main')
-        self.cli('spawn', '--id', 'fix', '--project', str(self.project), '--kind', 'scout',
-                 '--agent', 'claude', '--brief', str(self.brief),
-                 '--base', 'crew/ipf-pr1', '--share', 'crew-ipf')
-        self.assertEqual(self.meta('fix')['share'], 'crew-ipf')
-        self.assertEqual((self.worktree('fix') / '.crew/share').resolve(),
-                         (self.crew / 'state/share/crew-ipf').resolve())
-        self.cli('spawn', '--id', 'solo', '--project', str(self.project), '--kind', 'scout',
-                 '--agent', 'claude', '--brief', str(self.brief),
-                 '--base', 'crew/ipf', '--share', 'none')
-        self.assertIsNone(self.meta('solo')['share'])
-        self.assertFalse((self.worktree('solo') / '.crew/share').exists())
-        self.assertNotIn('PLAYTEST_DIR', (self.worktree('solo') / '.crew/env').read_text())
-        self.assertNotIn('PLAYTEST_DIR', json.loads((self.runtime / 'crew-solo.json').read_text())['shell_command'])
 
     def test_release_resources_stops_axi_and_frees_ports(self):
         axi_log = self.root / 'axi-stop.log'
@@ -511,9 +335,7 @@ class CrewTest(unittest.TestCase):
 
     def test_scout_teardown_checks_then_archives(self):
         self.cli('spawn', '--id', 'one', '--project', str(self.project), '--kind', 'scout',
-                 '--agent', 'claude', '--brief', str(self.brief), '--share', 'retained')
-        marker = self.crew / 'state/playtest/retained/marker.txt'
-        marker.write_text('keep packet evidence')
+                 '--agent', 'claude', '--brief', str(self.brief))
         self.cli('teardown', 'one', ok=False)  # live worker
         self.agent('done')
         self.cli('teardown', 'one', ok=False)  # no report / no usage
@@ -528,7 +350,6 @@ class CrewTest(unittest.TestCase):
         self.assertTrue((self.crew / 'state/usage.jsonl').exists())
         self.assertFalse((self.crew / 'state/one.meta').exists())
         self.assertFalse((self.crew / 'state/worktrees/one').exists())
-        self.assertEqual(marker.read_text(), 'keep packet evidence')
         self.spawn(ok=False)  # archived ids cannot be reused
 
     def test_finish_closes_without_agent_prompt(self):
@@ -715,7 +536,7 @@ class CrewTest(unittest.TestCase):
 
 
     def profile_spawn(self, ident, *options, **kwargs):
-        # OpenAI profiles use Pi (bypass). Passing the flag is harmless for Claude.
+        # Pi profiles need bypass; the flag is harmless for guarded harnesses.
         return self.cli('spawn', '--id', ident, '--project', str(self.project), '--kind', 'ship',
                         '--brief', str(self.brief), '--unattended-bypass', *options, **kwargs)
 
@@ -724,13 +545,16 @@ class CrewTest(unittest.TestCase):
         return call, call[call.index('--') + 1:]
 
     def test_worker_profile_models_and_effort(self):
-        cases = [('implicit', [], 'default', 'pi', 'openai-codex/gpt-5.6-luna', 'high'),
-                 ('explicit', ['--profile', 'default'], 'default', 'pi', 'openai-codex/gpt-5.6-luna', 'high'),
-                 ('planning', ['--profile', 'planning'], 'planning', 'pi', 'openai-codex/gpt-6-astra', 'high'),
-                 ('routine', ['--profile', 'routine'], 'routine', 'pi', 'openai-codex/gpt-5.6-luna', 'high'),
-                 ('mechanics', ['--profile', 'mechanics'], 'mechanics', 'pi', 'openai-codex/gpt-5.6-sol', 'xhigh'),
-                 ('new-feature', ['--profile', 'new-feature'], 'new-feature', 'claude', 'claude-sonnet-5', None)]
-        for ident, options, profile, harness, model, effort in cases:
+        # harness effort flag: pi --thinking, grok --reasoning-effort, claude --effort
+        cases = [('implicit', [], 'default', 'pi', 'openai-codex/gpt-6-luna', 'high', '--thinking'),
+                 ('explicit', ['--profile', 'default'], 'default', 'pi', 'openai-codex/gpt-6-luna', 'high', '--thinking'),
+                 ('planning', ['--profile', 'planning'], 'planning', 'grok', 'grok-4.5', 'high', '--reasoning-effort'),
+                 ('adversarial', ['--profile', 'adversarial'], 'adversarial', 'pi', 'openai-codex/gpt-6-astra', 'high', '--thinking'),
+                 ('routine', ['--profile', 'routine'], 'routine', 'pi', 'openai-codex/gpt-6-luna', 'high', '--thinking'),
+                 ('mechanics', ['--profile', 'mechanics'], 'mechanics', 'pi', 'openai-codex/gpt-6-sol', 'high', '--thinking'),
+                 ('artwork', ['--profile', 'artwork'], 'artwork', 'claude', 'claude-opus-5-5', 'xhigh', '--effort'),
+                 ('new-feature', ['--profile', 'new-feature'], 'new-feature', 'claude', 'claude-sonnet-5', None, None)]
+        for ident, options, profile, harness, model, effort, effort_flag in cases:
             with self.subTest(profile=ident):
                 self.profile_spawn(ident, *options)
                 meta = self.meta(ident)
@@ -740,13 +564,14 @@ class CrewTest(unittest.TestCase):
                 self.assertEqual(call[call.index('--kind') + 1], harness)
                 self.assertEqual(args[args.index('--model') + 1], model)
                 if effort:
-                    self.assertEqual(args[args.index('--thinking') + 1], effort)
+                    self.assertEqual(args[args.index(effort_flag) + 1], effort)
                 else:
                     self.assertNotIn('--thinking', args)
                     self.assertNotIn('--effort', args)
+                    self.assertNotIn('--reasoning-effort', args)
 
     def test_profile_overrides_and_native_harness_route(self):
-        self.profile_spawn('override', '--profile', 'planning', '--model', 'gpt-5.6-luna', '--effort', 'xhigh')
+        self.profile_spawn('override', '--profile', 'mechanics', '--model', 'gpt-6-luna', '--effort', 'xhigh')
         self.assertEqual(self.meta('override')['effort'], 'xhigh')
         override_args = self.start_args('override')[1]
         self.assertEqual(override_args[override_args.index('--thinking') + 1], 'xhigh')
@@ -773,7 +598,7 @@ class CrewTest(unittest.TestCase):
         self.assertFalse((self.crew / 'state/need-bypass.meta').exists())
 
     def test_resume_preserves_model_even_after_defaults_change(self):
-        self.profile_spawn('saved', '--profile', 'planning', ok=False,
+        self.profile_spawn('saved', '--profile', 'adversarial', ok=False,
                            env=dict(self.env, CREW_TEST_CREATE_FAIL='1'))
         p = self.crew / 'profiles.tsv'
         p.write_text(p.read_text().replace('gpt-6-astra', 'changed-default'))

@@ -1,6 +1,8 @@
 # profile<TAB>agent kind<TAB>model ID<TAB>effort (- means native default)
-default	pi	openai-codex/gpt-5.6-luna	high
-planning	pi	openai-codex/gpt-6-astra	high
-routine	pi	openai-codex/gpt-5.6-luna	high
-mechanics	pi	openai-codex/gpt-5.6-sol	xhigh
+default	pi	openai-codex/gpt-6-luna	high
+planning	grok	grok-4.5	high
+adversarial	pi	openai-codex/gpt-6-astra	high
+routine	pi	openai-codex/gpt-6-luna	high
+mechanics	pi	openai-codex/gpt-6-sol	high
+artwork	claude	claude-opus-5-5	xhigh
 new-feature	claude	claude-sonnet-5	-

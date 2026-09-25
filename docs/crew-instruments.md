@@ -3,9 +3,6 @@
 Five process tools earned the hard way. Use them. Do not call the scars
 "learnings" and then skip the bandage.
 
-Source of truth for the war stories:
-`state/share/community-demo-design/updates/retrospective-isometric-demo-wave-2026-09-20.md`.
-
 ---
 
 ## 1. Zero-Token Closeout (`bin/finish`)
@@ -15,7 +12,7 @@ Source of truth for the war stories:
 - Default: `bin/finish ID [--decision KEY] NOTE`
 - Tip-sync the worktree to the merged head first when needed
 - `bin/answer` is for decisions where the **worker must continue** (fix,
-  redesign, hosted-session resume)
+  redesign)
 - `bin/answer` refuses notes that look like done-only closeout (merged /
   emit done / refresh usage / goodbye) unless you pass `--force` and the
   note still names why the worker must keep going
@@ -94,9 +91,9 @@ first status after spawn should already be adding or running named tests.
 
 ## 5. Taste Freeze Gate (wireframe before xhigh paint)
 
-**Rule:** Contested chrome/plate ships do not spawn Astra/Fable **xhigh**
-until an owner-frozen wireframe or plate-ref pack exists on the share
-board (layout structure, not invented art).
+**Rule:** Contested chrome/plate ships do not spawn `artwork` (Opus 5.5
+**xhigh**) until an owner-frozen wireframe or plate-ref pack exists and is
+named in the brief (layout structure, not invented art).
 
 - Ban Imagine / generated comps as apply briefs
 - Cheaper implementor applies under allowlist
